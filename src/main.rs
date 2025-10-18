@@ -13,7 +13,7 @@ Date: October 2025
 
 use burn::{
     module::Module,
-    optim::{AdamConfig, GradientsParams, Optimizer},
+    optim::{AdamConfig, GradientsAccumulator, GradientsParams, Optimizer},
     record::{CompactRecorder, Recorder},
     tensor::{Tensor, backend::Backend},
 };
@@ -105,10 +105,17 @@ fn train_model() -> Result<(), Box<dyn Error>> {
     let dropout = 0.2;
 
     let seq_length = 20;
-    let batch_size = 8;
+    let effective_batch_size = 32; // Target batch size for optimization
+    let micro_batch_size = 4; // Actual batch size that fits in memory
+    let accumulation_steps = effective_batch_size / micro_batch_size;
     let num_epochs = 20;
     let learning_rate = 0.0001;
     let train_split = 0.8;
+
+    println!("Training configuration:");
+    println!("  Effective batch size: {}", effective_batch_size);
+    println!("  Micro batch size: {}", micro_batch_size);
+    println!("  Accumulation steps: {}\n", accumulation_steps);
 
     // Device
     let device = WgpuDevice::default();
@@ -135,31 +142,34 @@ fn train_model() -> Result<(), Box<dyn Error>> {
     model.print_architecture();
     println!();
 
-    // Create optimizer
+    // Create optimizer and gradient accumulator
     let mut optim = AdamConfig::new()
         .with_beta_1(0.9)
         .with_beta_2(0.999)
         .with_epsilon(1e-8)
         .init();
 
+    let mut grad_accumulator = GradientsAccumulator::new();
+
     println!("Starting training...\n");
 
     // Training loop
-    let num_train_batches = num_train.div_ceil(batch_size);
+    let num_micro_batches = num_train.div_ceil(micro_batch_size);
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0f32;
-        let mut num_batches = 0;
+        let mut num_losses = 0;
+        let mut steps_accumulated = 0;
 
-        for batch_idx in 0..num_train_batches {
-            let start_idx = batch_idx * batch_size;
-            let end_idx = (start_idx + batch_size).min(num_train);
+        for batch_idx in 0..num_micro_batches {
+            let start_idx = batch_idx * micro_batch_size;
+            let end_idx = (start_idx + micro_batch_size).min(num_train);
 
             if start_idx >= end_idx {
                 break;
             }
 
-            // Vectorized batch extraction using slicing
+            // Extract micro-batch
             let input_batch =
                 train_x
                     .clone()
@@ -169,23 +179,30 @@ fn train_model() -> Result<(), Box<dyn Error>> {
             // Forward pass
             let (predictions, _) = model.predict_last(input_batch, None);
 
-            // Fused MSE loss computation (single kernel chain)
+            // Compute loss
             let loss = ((predictions - target_batch).powf_scalar(2.0)).mean();
 
-            // Extract loss value before backward
+            // Extract loss value
             let loss_value: <MyBackend as Backend>::FloatElem = loss.clone().into_scalar();
             let loss_f32 = num_traits::ToPrimitive::to_f32(&loss_value).unwrap_or(0.0);
-
-            // Backward pass
-            let grads = loss.backward();
-            let grads = GradientsParams::from_grads(grads, &model);
-            model = optim.step(learning_rate, model, grads);
-
             total_loss += loss_f32;
-            num_batches += 1;
+            num_losses += 1;
+
+            // Backward pass and accumulate gradients
+            let grads = loss.backward();
+            grad_accumulator.accumulate(&model, GradientsParams::from_grads(grads, &model));
+            steps_accumulated += 1;
+
+            // Update weights after accumulation_steps or at end of epoch
+            if steps_accumulated >= accumulation_steps || batch_idx == num_micro_batches - 1 {
+                let accumulated_grads = grad_accumulator.grads();
+                let grads_params = accumulated_grads;
+                model = optim.step(learning_rate, model, grads_params);
+                steps_accumulated = 0;
+            }
         }
 
-        let avg_loss = total_loss / num_batches as f32;
+        let avg_loss = total_loss / num_losses as f32;
 
         // Validation
         if epoch % 5 == 0 && num_test > 0 {
@@ -299,10 +316,17 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
     let dropout = 0.2;
 
     let seq_length = 20;
-    let batch_size = 8;
+    let effective_batch_size = 32;
+    let micro_batch_size = 4;
+    let accumulation_steps = effective_batch_size / micro_batch_size;
     let num_epochs = 10; // Additional epochs
     let learning_rate = 0.00005; // Lower learning rate for fine-tuning
     let train_split = 0.8;
+
+    println!("Training configuration:");
+    println!("  Effective batch size: {}", effective_batch_size);
+    println!("  Micro batch size: {}", micro_batch_size);
+    println!("  Accumulation steps: {}\n", accumulation_steps);
 
     // Device
     let device = WgpuDevice::default();
@@ -328,25 +352,28 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
     let mut model = load_model::<MyBackend>(config, model_path, &device)?;
     println!("Model loaded successfully!\n");
 
-    // Create optimizer
+    // Create optimizer and gradient accumulator
     let mut optim = AdamConfig::new()
         .with_beta_1(0.9)
         .with_beta_2(0.999)
         .with_epsilon(1e-8)
         .init();
 
+    let mut grad_accumulator = GradientsAccumulator::new();
+
     println!("Continuing training for {} more epochs...\n", num_epochs);
 
     // Training loop
-    let num_train_batches = num_train.div_ceil(batch_size);
+    let num_micro_batches = num_train.div_ceil(micro_batch_size);
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0f32;
-        let mut num_batches = 0;
+        let mut num_losses = 0;
+        let mut steps_accumulated = 0;
 
-        for batch_idx in 0..num_train_batches {
-            let start_idx = batch_idx * batch_size;
-            let end_idx = (start_idx + batch_size).min(num_train);
+        for batch_idx in 0..num_micro_batches {
+            let start_idx = batch_idx * micro_batch_size;
+            let end_idx = (start_idx + micro_batch_size).min(num_train);
 
             if start_idx >= end_idx {
                 break;
@@ -363,16 +390,24 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
 
             let loss_value: <MyBackend as Backend>::FloatElem = loss.clone().into_scalar();
             let loss_f32 = num_traits::ToPrimitive::to_f32(&loss_value).unwrap_or(0.0);
-
-            let grads = loss.backward();
-            let grads = GradientsParams::from_grads(grads, &model);
-            model = optim.step(learning_rate, model, grads);
-
             total_loss += loss_f32;
-            num_batches += 1;
+            num_losses += 1;
+
+            // Accumulate gradients
+            let grads = loss.backward();
+            grad_accumulator.accumulate(&model, GradientsParams::from_grads(grads, &model));
+            steps_accumulated += 1;
+
+            // Update weights after accumulation_steps or at end of epoch
+            if steps_accumulated >= accumulation_steps || batch_idx == num_micro_batches - 1 {
+                let accumulated_grads = grad_accumulator.grads();
+                let grads_params = accumulated_grads;
+                model = optim.step(learning_rate, model, grads_params);
+                steps_accumulated = 0;
+            }
         }
 
-        let avg_loss = total_loss / num_batches as f32;
+        let avg_loss = total_loss / num_losses as f32;
 
         if epoch % 2 == 0 && num_test > 0 {
             let val_loss = evaluate(
