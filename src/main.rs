@@ -11,6 +11,7 @@ Author: Mudit Bhargava (Ported to Rust)
 Date: October 2025
 */
 
+use burn::optim::decay::WeightDecayConfig;
 use burn::{
     module::Module,
     optim::{AdamConfig, GradientsAccumulator, GradientsParams, Optimizer},
@@ -147,6 +148,7 @@ fn train_model() -> Result<(), Box<dyn Error>> {
         .with_beta_1(0.9)
         .with_beta_2(0.999)
         .with_epsilon(1e-8)
+        .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
         .init();
 
     let mut grad_accumulator = GradientsAccumulator::new();
