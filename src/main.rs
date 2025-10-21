@@ -5,7 +5,8 @@
 Financial Time Series Forecasting with xLSTM using Embeddings
 
 This example demonstrates how to use xLSTM for financial forecasting
-using pre-computed embeddings from `embeddings_128.csv`.
+using pre-computed embeddings from `embeddings_128.csv`, with support
+for per-block learning rates.
 
 Author: Mudit Bhargava (Ported to Rust)
 Date: October 2025
@@ -14,7 +15,7 @@ Date: October 2025
 use burn::optim::decay::WeightDecayConfig;
 use burn::{
     module::Module,
-    optim::{AdamConfig, GradientsAccumulator, GradientsParams, Optimizer},
+    optim::AdamConfig,
     record::{CompactRecorder, Recorder},
     tensor::{Tensor, backend::Backend},
 };
@@ -26,7 +27,7 @@ use plotters::prelude::*;
 use serde::Deserialize;
 use std::error::Error;
 use std::path::Path;
-use xlstm::{LstmType, XLstm, XLstmconfig};
+use xlstm::{LearningRateConfig, LstmType, XLstm, XLstmconfig};
 
 type MyBackend = Autodiff<Wgpu>;
 
@@ -106,17 +107,24 @@ fn train_model() -> Result<(), Box<dyn Error>> {
     let dropout = 0.2;
 
     let seq_length = 20;
-    let effective_batch_size = 32; // Target batch size for optimization
-    let micro_batch_size = 4; // Actual batch size that fits in memory
-    let accumulation_steps = effective_batch_size / micro_batch_size;
+    let batch_size = 4; // Batch size per update step
     let num_epochs = 20;
-    let learning_rate = 0.0001;
+
+    // Per-block learning rates: sLSTM uses 1e-4, mLSTM uses 1e-5, others use 1e-4
+    let lr_config = LearningRateConfig::per_block_type(
+        1e-4, // sLSTM learning rate
+        1e-5, // mLSTM learning rate
+        1e-4, // Other components learning rate
+    );
+
     let train_split = 0.8;
 
     println!("Training configuration:");
-    println!("  Effective batch size: {}", effective_batch_size);
-    println!("  Micro batch size: {}", micro_batch_size);
-    println!("  Accumulation steps: {}\n", accumulation_steps);
+    println!("  Batch size: {}", batch_size);
+    println!("  Learning rates:");
+    println!("    sLSTM blocks: 1e-4");
+    println!("    mLSTM blocks: 1e-5");
+    println!("    Other layers: 1e-4\n");
 
     // Device
     let device = WgpuDevice::default();
@@ -143,7 +151,7 @@ fn train_model() -> Result<(), Box<dyn Error>> {
     model.print_architecture();
     println!();
 
-    // Create optimizer and gradient accumulator
+    // Create optimizer
     let mut optim = AdamConfig::new()
         .with_beta_1(0.9)
         .with_beta_2(0.999)
@@ -151,27 +159,25 @@ fn train_model() -> Result<(), Box<dyn Error>> {
         .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
         .init();
 
-    let mut grad_accumulator = GradientsAccumulator::new();
-
     println!("Starting training...\n");
+    println!("Note: Per-block learning rates require per-step updates\n");
 
     // Training loop
-    let num_micro_batches = num_train.div_ceil(micro_batch_size);
+    let num_batches = num_train.div_ceil(batch_size);
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0f32;
         let mut num_losses = 0;
-        let mut steps_accumulated = 0;
 
-        for batch_idx in 0..num_micro_batches {
-            let start_idx = batch_idx * micro_batch_size;
-            let end_idx = (start_idx + micro_batch_size).min(num_train);
+        for batch_idx in 0..num_batches {
+            let start_idx = batch_idx * batch_size;
+            let end_idx = (start_idx + batch_size).min(num_train);
 
             if start_idx >= end_idx {
                 break;
             }
 
-            // Extract micro-batch
+            // Extract batch
             let input_batch =
                 train_x
                     .clone()
@@ -190,18 +196,9 @@ fn train_model() -> Result<(), Box<dyn Error>> {
             total_loss += loss_f32;
             num_losses += 1;
 
-            // Backward pass and accumulate gradients
+            // Backward pass and immediate update
             let grads = loss.backward();
-            grad_accumulator.accumulate(&model, GradientsParams::from_grads(grads, &model));
-            steps_accumulated += 1;
-
-            // Update weights after accumulation_steps or at end of epoch
-            if steps_accumulated >= accumulation_steps || batch_idx == num_micro_batches - 1 {
-                let accumulated_grads = grad_accumulator.grads();
-                let grads_params = accumulated_grads;
-                model = optim.step(learning_rate, model, grads_params);
-                steps_accumulated = 0;
-            }
+            model = model.optimizer_step(&lr_config, &mut optim, grads);
         }
 
         let avg_loss = total_loss / num_losses as f32;
@@ -318,17 +315,24 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
     let dropout = 0.2;
 
     let seq_length = 20;
-    let effective_batch_size = 32;
-    let micro_batch_size = 4;
-    let accumulation_steps = effective_batch_size / micro_batch_size;
+    let batch_size = 4; // Batch size per update step
     let num_epochs = 10; // Additional epochs
-    let learning_rate = 0.00005; // Lower learning rate for fine-tuning
+
+    // Use even lower learning rates for fine-tuning
+    let lr_config = LearningRateConfig::per_block_type(
+        5e-5, // sLSTM learning rate (reduced from 1e-4)
+        5e-6, // mLSTM learning rate (reduced from 1e-5)
+        5e-5, // Other components learning rate
+    );
+
     let train_split = 0.8;
 
     println!("Training configuration:");
-    println!("  Effective batch size: {}", effective_batch_size);
-    println!("  Micro batch size: {}", micro_batch_size);
-    println!("  Accumulation steps: {}\n", accumulation_steps);
+    println!("  Batch size: {}", batch_size);
+    println!("  Learning rates (fine-tuning):");
+    println!("    sLSTM blocks: 5e-5");
+    println!("    mLSTM blocks: 5e-6");
+    println!("    Other layers: 5e-5\n");
 
     // Device
     let device = WgpuDevice::default();
@@ -354,28 +358,26 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
     let mut model = load_model::<MyBackend>(config, model_path, &device)?;
     println!("Model loaded successfully!\n");
 
-    // Create optimizer and gradient accumulator
+    // Create optimizer
     let mut optim = AdamConfig::new()
         .with_beta_1(0.9)
         .with_beta_2(0.999)
         .with_epsilon(1e-8)
         .init();
 
-    let mut grad_accumulator = GradientsAccumulator::new();
-
     println!("Continuing training for {} more epochs...\n", num_epochs);
+    println!("Note: Per-block learning rates require per-step updates\n");
 
     // Training loop
-    let num_micro_batches = num_train.div_ceil(micro_batch_size);
+    let num_batches = num_train.div_ceil(batch_size);
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0f32;
         let mut num_losses = 0;
-        let mut steps_accumulated = 0;
 
-        for batch_idx in 0..num_micro_batches {
-            let start_idx = batch_idx * micro_batch_size;
-            let end_idx = (start_idx + micro_batch_size).min(num_train);
+        for batch_idx in 0..num_batches {
+            let start_idx = batch_idx * batch_size;
+            let end_idx = (start_idx + batch_size).min(num_train);
 
             if start_idx >= end_idx {
                 break;
@@ -395,18 +397,9 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
             total_loss += loss_f32;
             num_losses += 1;
 
-            // Accumulate gradients
+            // Backward pass and immediate update
             let grads = loss.backward();
-            grad_accumulator.accumulate(&model, GradientsParams::from_grads(grads, &model));
-            steps_accumulated += 1;
-
-            // Update weights after accumulation_steps or at end of epoch
-            if steps_accumulated >= accumulation_steps || batch_idx == num_micro_batches - 1 {
-                let accumulated_grads = grad_accumulator.grads();
-                let grads_params = accumulated_grads;
-                model = optim.step(learning_rate, model, grads_params);
-                steps_accumulated = 0;
-            }
+            model = model.optimizer_step(&lr_config, &mut optim, grads);
         }
 
         let avg_loss = total_loss / num_losses as f32;

@@ -2,7 +2,8 @@
 # xLSTM: Extended Long Short-Term Memory Model
 
 This module implements the main xLSTM model that can stack multiple blocks
-with flexible mixing of sLSTM and mLSTM.
+with flexible mixing of sLSTM and mLSTM, including support for per-block
+learning rates.
 
 Author: Mudit Bhargava (Ported to Rust)
 Date: October 2025
@@ -10,9 +11,13 @@ Date: October 2025
 
 use burn::{
     config::Config,
-    module::Module,
+    module::{Module, ParamId},
     nn::{Dropout, DropoutConfig, Initializer, LayerNorm, LayerNormConfig, Linear, LinearConfig},
-    tensor::{Tensor, activation, backend::Backend},
+    optim::{GradientsParams, Optimizer},
+    tensor::{
+        Tensor, activation,
+        backend::{AutodiffBackend, Backend},
+    },
 };
 use num_traits::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
@@ -30,6 +35,49 @@ pub enum LstmType {
     Alternate,
     /// Custom pattern specified by user
     Custom(alloc::vec::Vec<BlockType>),
+}
+
+/// Learning rate configuration for different parts of the model
+#[derive(Debug, Clone)]
+pub enum LearningRateConfig {
+    /// Uniform learning rate for all parameters
+    Uniform(f64),
+    /// Different learning rates for sLSTM vs mLSTM blocks
+    PerBlockType {
+        slstm_lr: f64,
+        mlstm_lr: f64,
+        other_lr: f64, // For input projection and output head
+    },
+    /// Explicit learning rate per block (length must match num_blocks)
+    /// Also includes learning rate for input projection and output head
+    PerBlock {
+        block_lrs: alloc::vec::Vec<f64>,
+        other_lr: f64,
+    },
+}
+
+impl LearningRateConfig {
+    /// Create a uniform learning rate configuration
+    pub fn uniform(lr: f64) -> Self {
+        Self::Uniform(lr)
+    }
+
+    /// Create per-block-type learning rate configuration
+    pub fn per_block_type(slstm_lr: f64, mlstm_lr: f64, other_lr: f64) -> Self {
+        Self::PerBlockType {
+            slstm_lr,
+            mlstm_lr,
+            other_lr,
+        }
+    }
+
+    /// Create per-block learning rate configuration
+    pub fn per_block(block_lrs: alloc::vec::Vec<f64>, other_lr: f64) -> Self {
+        Self::PerBlock {
+            block_lrs,
+            other_lr,
+        }
+    }
 }
 
 /// Configuration for xLSTM model
@@ -270,6 +318,126 @@ impl<B: Backend> XLstm<B> {
                 BlockType::MLSTM => "mLSTM",
             };
             println!("    Block {}: {}", i + 1, type_str);
+        }
+    }
+}
+
+// Extension trait for per-block learning rate optimization
+impl<B: AutodiffBackend> XLstm<B> {
+    /// Get parameter IDs for a specific block
+    pub fn get_block_param_ids(&self, block_idx: usize) -> alloc::vec::Vec<ParamId> {
+        if block_idx >= self.blocks.len() {
+            return alloc::vec![];
+        }
+
+        use burn::module::list_param_ids;
+        list_param_ids(&self.blocks[block_idx])
+    }
+
+    /// Get parameter IDs for input projection and output head
+    pub fn get_other_param_ids(&self) -> alloc::vec::Vec<ParamId> {
+        use burn::module::list_param_ids;
+
+        let mut ids = alloc::vec::Vec::new();
+
+        if let Some((linear, norm, _dropout)) = &self.input_projection {
+            ids.extend(list_param_ids(linear));
+            ids.extend(list_param_ids(norm));
+        }
+
+        let (linear1, _dropout, linear2) = &self.output_head;
+        ids.extend(list_param_ids(linear1));
+        ids.extend(list_param_ids(linear2));
+
+        ids
+    }
+
+    /// Apply optimizer step with per-block learning rates
+    ///
+    /// # Arguments
+    /// * `lr_config` - Learning rate configuration
+    /// * `optimizer` - The optimizer to use
+    /// * `grads` - Gradients for all parameters
+    ///
+    /// # Returns
+    /// * Updated model
+    pub fn optimizer_step<O: Optimizer<Self, B>>(
+        self,
+        lr_config: &LearningRateConfig,
+        optimizer: &mut O,
+        mut grads: B::Gradients,
+    ) -> Self {
+        match lr_config {
+            LearningRateConfig::Uniform(lr) => {
+                // Simple case: single learning rate for everything
+                let grads_params = GradientsParams::from_grads(grads, &self);
+                optimizer.step(*lr, self, grads_params)
+            }
+            LearningRateConfig::PerBlockType {
+                slstm_lr,
+                mlstm_lr,
+                other_lr,
+            } => {
+                // Collect block types before we start moving model
+                let block_info: alloc::vec::Vec<(usize, BlockType, f64)> = self
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, block)| {
+                        let lr = match block.get_type() {
+                            BlockType::SLSTM => *slstm_lr,
+                            BlockType::MLSTM => *mlstm_lr,
+                        };
+                        (i, block.get_type(), lr)
+                    })
+                    .collect();
+
+                let mut model = self;
+
+                // Process each block
+                for (i, _block_type, lr) in block_info {
+                    let param_ids = model.get_block_param_ids(i);
+                    let block_grads = GradientsParams::from_params(&mut grads, &model, &param_ids);
+                    model = optimizer.step(lr, model, block_grads);
+                }
+
+                // Process input projection and output head
+                let other_param_ids = model.get_other_param_ids();
+                let other_grads =
+                    GradientsParams::from_params(&mut grads, &model, &other_param_ids);
+                model = optimizer.step(*other_lr, model, other_grads);
+
+                model
+            }
+            LearningRateConfig::PerBlock {
+                block_lrs,
+                other_lr,
+            } => {
+                assert_eq!(
+                    block_lrs.len(),
+                    self.blocks.len(),
+                    "block_lrs length must match number of blocks"
+                );
+
+                let num_blocks = self.blocks.len();
+                let mut model = self;
+
+                // Process each block with its specific learning rate
+                for i in 0..num_blocks {
+                    let lr = block_lrs[i];
+                    let param_ids = model.get_block_param_ids(i);
+                    let block_grads = GradientsParams::from_params(&mut grads, &model, &param_ids);
+                    model = optimizer.step(lr, model, block_grads);
+                }
+
+                // Process input projection and output head
+                let other_param_ids = model.get_other_param_ids();
+                let other_grads =
+                    GradientsParams::from_params(&mut grads, &model, &other_param_ids);
+                model = optimizer.step(*other_lr, model, other_grads);
+
+                model
+            }
         }
     }
 }
