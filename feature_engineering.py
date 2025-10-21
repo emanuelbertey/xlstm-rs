@@ -270,8 +270,11 @@ def create_all_features(filepath, output_path="features_engineered.csv"):
 
 
 def create_embeddings(features_df, embedding_size=128, output_path="embeddings.csv"):
-    """Create fixed-size embeddings using PCA"""
-    print("\nCreating embeddings...")
+    """Create fixed-size embeddings using PCA without look-ahead bias
+
+    Uses expanding window: for each time point, fits scaler/PCA only on past data.
+    """
+    print("\nCreating embeddings (no look-ahead bias)...")
 
     # Select only numeric columns (excluding date and text columns)
     numeric_cols = features_df.select_dtypes(include=[np.number]).columns.tolist()
@@ -280,40 +283,97 @@ def create_embeddings(features_df, embedding_size=128, output_path="embeddings.c
     exclude_cols = ["year", "day_of_month", "week_of_year"]
     numeric_cols = [col for col in numeric_cols if col not in exclude_cols]
 
-    X = features_df[numeric_cols].fillna(0)
+    X = features_df[numeric_cols].fillna(0).values
+    n_samples, n_features = X.shape
 
-    print(f"Number of features available: {X.shape[1]}")
+    print(f"Number of features available: {n_features}")
+    print(f"Total samples: {n_samples}")
 
-    # Check if we have enough features
-    if X.shape[1] < embedding_size:
+    # Minimum training size (approximately 1 year of trading days)
+    min_train_size = min(252, max(60, n_samples // 10))
+    print(f"Using minimum training size: {min_train_size} samples")
+
+    # Initialize embeddings array
+    embeddings = np.zeros((n_samples, embedding_size))
+    use_pca = n_features >= embedding_size
+
+    if not use_pca:
         print(
-            f"WARNING: Only {X.shape[1]} features available, but {embedding_size} dimensions requested."
+            f"WARNING: Only {n_features} features available, but {embedding_size} dimensions requested."
         )
-        print("Options:")
-        print(f"  1. Using all {X.shape[1]} features (no dimensionality reduction)")
-        print(f"  2. Padding with zeros to reach {embedding_size} dimensions")
+        print("Will use zero-padding approach.")
 
-        # Option 2: Pad with zeros
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
+    print("\nProcessing with expanding window (no look-ahead)...")
+    print("This may take a few minutes for large datasets...")
 
-        # Pad to desired size
-        padding = np.zeros((X_scaled.shape[0], embedding_size - X.shape[1]))
-        embeddings = np.hstack([X_scaled, padding])
-        pca = None
+    # Process each time point using only past data
+    for i in range(n_samples):
+        if i < min_train_size:
+            # For initial period, use all available data up to current point
+            X_train = X[: i + 1]
 
-        print(f"Using zero-padding approach. Embeddings shape: {embeddings.shape}")
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X_train)
+
+            # Use current (last) point
+            if use_pca and i >= 10:  # Need at least a few samples for PCA
+                n_components = min(
+                    embedding_size, X_scaled.shape[0] - 1, X_scaled.shape[1]
+                )
+                if n_components > 0:
+                    pca = PCA(n_components=n_components)
+                    # Fit on all except current, transform current
+                    if X_scaled.shape[0] > 1:
+                        pca.fit(X_scaled[:-1])
+                        emb = pca.transform(X_scaled[-1:])
+                        embeddings[i, : emb.shape[1]] = emb[0]
+                    else:
+                        embeddings[i, : min(n_features, embedding_size)] = X_scaled[
+                            -1, : min(n_features, embedding_size)
+                        ]
+                else:
+                    embeddings[i, : min(n_features, embedding_size)] = X_scaled[
+                        -1, : min(n_features, embedding_size)
+                    ]
+            else:
+                # Just use scaled features
+                embeddings[i, : min(n_features, embedding_size)] = X_scaled[
+                    -1, : min(n_features, embedding_size)
+                ]
+        else:
+            # Standard case: use all past data to fit, transform current point
+            X_past = X[:i]  # All data BEFORE current point
+            X_current = X[i : i + 1]  # Current point only
+
+            # Fit scaler on past data only
+            scaler = StandardScaler()
+            X_past_scaled = scaler.fit_transform(X_past)
+            X_current_scaled = scaler.transform(X_current)
+
+            if use_pca:
+                # Fit PCA on past data only
+                pca = PCA(n_components=embedding_size)
+                pca.fit(X_past_scaled)
+
+                # Transform current point using past-fitted PCA
+                embedding_current = pca.transform(X_current_scaled)
+                embeddings[i] = embedding_current[0]
+            else:
+                # Pad with zeros if needed
+                embeddings[i, :n_features] = X_current_scaled[0]
+
+        # Progress indicator
+        if (i + 1) % 250 == 0 or i == n_samples - 1:
+            print(
+                f"  Processed {i + 1}/{n_samples} samples ({100 * (i + 1) / n_samples:.1f}%)"
+            )
+
+    if use_pca:
+        print("✓ PCA-based embeddings created")
     else:
-        # Standardize features
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
+        print("✓ Scaled + zero-padded embeddings created")
 
-        # Apply PCA to reduce to embedding_size
-        pca = PCA(n_components=embedding_size)
-        embeddings = pca.fit_transform(X_scaled)
-
-        print(f"Explained variance ratio: {pca.explained_variance_ratio_.sum():.4f}")
-        print(f"Embeddings shape: {embeddings.shape}")
+    print(f"✓ Final embeddings shape: {embeddings.shape}")
 
     # Create embeddings dataframe
     embedding_cols = [f"emb_{i}" for i in range(embedding_size)]
@@ -331,9 +391,11 @@ def create_embeddings(features_df, embedding_size=128, output_path="embeddings.c
     )
 
     embeddings_df.to_csv(output_path, index=False)
-    print(f"Embeddings saved to {output_path}")
+    print(f"\n✓ Embeddings saved to {output_path}")
+    print("✓ NO LOOK-AHEAD BIAS: Each embedding uses only past data")
 
-    return embeddings_df, pca, scaler
+    # Return None for pca and scaler since we use different ones for each point
+    return embeddings_df, None, None
 
 
 if __name__ == "__main__":
