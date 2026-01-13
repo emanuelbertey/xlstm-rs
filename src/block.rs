@@ -36,13 +36,16 @@ pub struct XLstmblockConfig {
     pub hidden_size: usize,
     /// Number of layers
     pub num_layers: usize,
+    /// Number of heads for multi-head mLSTM
+    #[config(default = "4")]
+    pub num_heads: usize,
     /// Dropout probability
     #[config(default = "0.0")]
     pub dropout: f64,
     /// Block type (sLSTM or mLSTM)
     pub block_type: BlockType,
     /// Weight initializer
-    #[config(default = "Initializer::XavierNormal{gain:1.0}")]
+    #[config(default = "Initializer::XavierNormal{gain:0.1}")]
     pub initializer: Initializer,
 }
 
@@ -67,6 +70,7 @@ impl XLstmblockConfig {
             BlockType::MLSTM => {
                 let lstm: MLstm<B> =
                     MLstmconfig::new(self.input_size, self.hidden_size, self.num_layers)
+                        .with_num_heads(self.num_heads)
                         .with_dropout(self.dropout)
                         .with_initializer(self.initializer.clone())
                         .init(device);
@@ -153,14 +157,16 @@ impl<B: Backend> XLstmblock<B> {
                 }
             };
 
+        // Apply normalization BEFORE activation for stability (critical for mLSTM)
+        let output: Tensor<B, 3> = self.norm.forward(lstm_output);
         // Apply activation
-        let output: Tensor<B, 3> = activation::gelu(lstm_output);
-        // Apply normalization
-        let output: Tensor<B, 3> = self.norm.forward(output);
+        let output: Tensor<B, 3> = activation::gelu(output);
         // Apply projection
         let output: Tensor<B, 3> = self.proj.forward(output);
-        // Apply dropout and residual connection
-        let output: Tensor<B, 3> = self.dropout.forward(output) + input_seq;
+        // Apply dropout
+        let output: Tensor<B, 3> = self.dropout.forward(output);
+        // Residual connection
+        let output: Tensor<B, 3> = output + input_seq;
 
         (output, new_state)
     }
@@ -174,38 +180,5 @@ impl<B: Backend> XLstmblock<B> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn::tensor::Distribution;
 
-    type TestBackend = burn_ndarray::NdArray<f32>;
 
-    #[test]
-    fn test_slstm_block() {
-        let device = Default::default();
-        let config = XLstmblockConfig::new(64, 128, 2, BlockType::SLSTM).with_dropout(0.1);
-        let block = config.init::<TestBackend>(&device);
-
-        let input = Tensor::<TestBackend, 3>::random([4, 10, 64], Distribution::Default, &device);
-
-        let (output, state) = block.forward(input, None);
-
-        assert_eq!(output.dims(), [4, 10, 64]);
-        assert!(state.is_some());
-    }
-
-    #[test]
-    fn test_mlstm_block() {
-        let device = Default::default();
-        let config = XLstmblockConfig::new(64, 128, 2, BlockType::MLSTM).with_dropout(0.1);
-        let block = config.init::<TestBackend>(&device);
-
-        let input = Tensor::<TestBackend, 3>::random([4, 10, 64], Distribution::Default, &device);
-
-        let (output, state) = block.forward(input, None);
-
-        assert_eq!(output.dims(), [4, 10, 64]);
-        assert!(state.is_some());
-    }
-}

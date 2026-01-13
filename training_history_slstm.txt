@@ -1,0 +1,32 @@
+====================================================
+ÉPOCA: 1 | LOSS: 5.3909 | ACC: 6.51%
+SEMILLA: l ad i es ,
+----------------------------------------------------
+l ad i es ,Ihaved,you,Had,I'ss,mytandd.PIO:Iknowyou,Iknow'diss,andands,Andyou,Ihavethed;AndIpr,myst,I'll,ITAAA:I's,Andyou,mydt,andandthes.GPA:Iamtes,andtachs,I'sandcco
+====================================================
+
+
+====================================================
+ÉPOCA: 1 | LOSS: 4.7636 | ACC: 10.64%
+SEMILLA: f rown . G R
+----------------------------------------------------
+f rown . G RTPRIO:BA:Iwill,Iknowsandyou,you,myself.PARETIS:Shor,IwillbeforeI'llds,Andsandather;Andbefore,andIhaved,sir,mylord,andIhavenot,sir.PETRPATISA:TATRUCHIO:PETTHAPETRUCHIO:Let,andyou
+====================================================
+
+
+====================================================
+ÉPOCA: 2 | LOSS: 4.4505 | ACC: 12.98%
+SEMILLA: for be ar ; you
+----------------------------------------------------
+for be ar ; you,sir,Iknows.PETRUCHIO:Iwillbeguke.BPISTISABELIO:Iamds,mybrother:I'llco'st:Iwillbeforemylord,Iknow,Italse,andthatIwouldbeforeI'llcose,Iam,Iam,andwe'llcess,And,I'lls,Ihavewinds.P
+====================================================
+
+
+====================================================
+ÉPOCA: 3 | LOSS: 4.2635 | ACC: 14.63%
+SEMILLA: am or ous l oo
+----------------------------------------------------
+am or ous l ood,Iwillnotsobrick,sir.PETRUCHIO:Provops,Ihavehe'dtobedawer?BAPAPATTAPPASTASSTA:APRUCHUCHIO:Forthesandcrowns,Ihavenot,Andnotstraved,Andnow,andasfudie,Iaminterandsingof
+====================================================
+
+

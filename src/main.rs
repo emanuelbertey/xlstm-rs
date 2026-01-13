@@ -1,4 +1,3 @@
-#![feature(slice_pattern)]
 #![recursion_limit = "256"]
 
 /*!
@@ -14,14 +13,14 @@ Date: October 2025
 
 use burn::optim::decay::WeightDecayConfig;
 use burn::{
+    module::AutodiffModule,
     module::Module,
     optim::AdamConfig,
     record::{CompactRecorder, Recorder},
     tensor::{Tensor, backend::Backend},
 };
 use burn_autodiff::Autodiff;
-use burn_wgpu::{Wgpu, WgpuDevice};
-use core::slice::SlicePattern;
+use burn_ndarray::{NdArray, NdArrayDevice};
 use csv::ReaderBuilder;
 use plotters::prelude::*;
 use serde::Deserialize;
@@ -29,7 +28,7 @@ use std::error::Error;
 use std::path::Path;
 use xlstm::{LearningRateConfig, LstmType, XLstm, XLstmconfig};
 
-type MyBackend = Autodiff<Wgpu>;
+type MyBackend = Autodiff<NdArray>;
 
 type DataLoadResult = Result<(Vec<Vec<f32>>, Vec<f32>), Box<dyn Error>>;
 
@@ -127,7 +126,7 @@ fn train_model() -> Result<(), Box<dyn Error>> {
     println!("    Other layers: 1e-4\n");
 
     // Device
-    let device = WgpuDevice::default();
+    let device = NdArrayDevice::Cpu;
 
     // Create sequences
     println!("Creating sequences (seq_length={seq_length})...");
@@ -144,6 +143,7 @@ fn train_model() -> Result<(), Box<dyn Error>> {
     println!("Creating xLSTM model with alternating sLSTM/mLSTM blocks...");
     let config = XLstmconfig::new(input_size, hidden_size, num_layers, num_blocks, output_size)
         .with_dropout(dropout)
+        .with_num_heads(4)
         .with_lstm_type(LstmType::Alternate)
         .with_use_projection(true);
 
@@ -163,7 +163,7 @@ fn train_model() -> Result<(), Box<dyn Error>> {
     println!("Note: Per-block learning rates require per-step updates\n");
 
     // Training loop
-    let num_batches = num_train.div_ceil(batch_size);
+    let num_batches = num_train / batch_size;
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0f32;
@@ -206,9 +206,9 @@ fn train_model() -> Result<(), Box<dyn Error>> {
         // Validation
         if epoch % 5 == 0 && num_test > 0 {
             let val_loss = evaluate(
-                &model,
-                &test_x,
-                &test_y,
+                &model.clone().valid(),
+                &test_x.clone().inner(),
+                &test_y.clone().inner(),
                 seq_length,
                 input_size,
                 output_size,
@@ -238,9 +238,8 @@ fn train_model() -> Result<(), Box<dyn Error>> {
     println!("\nModel saved to: {}.mpk", model_path);
 
     // Make predictions
-    println!("\nGenerating predictions on test set...");
     let (predictions, actuals) =
-        make_predictions(&model, &test_x, &test_prices, seq_length, input_size);
+        make_predictions(&model.valid(), &test_x.clone().inner(), &test_prices, seq_length, input_size);
 
     display_metrics(&predictions, &actuals)?;
 
@@ -268,12 +267,12 @@ fn infer_model(model_path: &str) -> Result<(), Box<dyn Error>> {
     let train_split = 0.8;
 
     // Device
-    let device = WgpuDevice::default();
+    let device = NdArrayDevice::Cpu;
 
     // Create sequences
     println!("Creating sequences...");
     let (_, _, test_x, _, test_prices) =
-        create_sequences(&embeddings, &prices, seq_length, train_split, &device);
+        create_sequences::<MyBackend>(&embeddings, &prices, seq_length, train_split, &device);
 
     println!("Testing samples: {}\n", test_x.dims()[0]);
 
@@ -285,12 +284,12 @@ fn infer_model(model_path: &str) -> Result<(), Box<dyn Error>> {
         .with_use_projection(true);
 
     let model = load_model::<MyBackend>(config, model_path, &device)?;
+    let model_valid = model.valid();
     println!("Model loaded successfully!\n");
 
     // Make predictions
-    println!("Generating predictions...");
     let (predictions, actuals) =
-        make_predictions(&model, &test_x, &test_prices, seq_length, input_size);
+        make_predictions(&model_valid, &test_x.clone().inner(), &test_prices, seq_length, input_size);
 
     display_metrics(&predictions, &actuals)?;
 
@@ -335,7 +334,7 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
     println!("    Other layers: 5e-5\n");
 
     // Device
-    let device = WgpuDevice::default();
+    let device = NdArrayDevice::Cpu;
 
     // Create sequences
     println!("Creating sequences...");
@@ -369,7 +368,7 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
     println!("Note: Per-block learning rates require per-step updates\n");
 
     // Training loop
-    let num_batches = num_train.div_ceil(batch_size);
+    let num_batches = num_train / batch_size;
 
     for epoch in 0..num_epochs {
         let mut total_loss = 0.0f32;
@@ -406,9 +405,9 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
 
         if epoch % 2 == 0 && num_test > 0 {
             let val_loss = evaluate(
-                &model,
-                &test_x,
-                &test_y,
+                &model.clone().valid(),
+                &test_x.clone().inner(),
+                &test_y.clone().inner(),
                 seq_length,
                 input_size,
                 output_size,
@@ -436,9 +435,8 @@ fn continue_training(model_path: &str) -> Result<(), Box<dyn Error>> {
     println!("\nUpdated model saved to: {}.mpk", updated_model_path);
 
     // Make predictions
-    println!("\nGenerating predictions...");
     let (predictions, actuals) =
-        make_predictions(&model, &test_x, &test_prices, seq_length, input_size);
+        make_predictions(&model.valid(), &test_x.clone().inner(), &test_prices, seq_length, input_size);
 
     display_metrics(&predictions, &actuals)?;
 
@@ -575,22 +573,22 @@ fn create_sequences<B: Backend>(
 
     // Create stacked tensors for train set
     let train_x = Tensor::<B, 1>::from_floats(
-        x_data[..(split_idx * seq_length * input_size)].as_slice(),
+        &x_data[..(split_idx * seq_length * input_size)],
         device,
     )
     .reshape([split_idx, seq_length, input_size]);
     let train_y =
-        Tensor::<B, 1>::from_floats(y_data[..split_idx].as_slice(), device).reshape([split_idx, 1]);
+        Tensor::<B, 1>::from_floats(&y_data[..split_idx], device).reshape([split_idx, 1]);
 
     // Create stacked tensors for test set
     let test_len = num_sequences - split_idx;
     let test_x = Tensor::<B, 1>::from_floats(
-        x_data[(split_idx * seq_length * input_size)..].as_slice(),
+        &x_data[(split_idx * seq_length * input_size)..],
         device,
     )
     .reshape([test_len, seq_length, input_size]);
     let test_y =
-        Tensor::<B, 1>::from_floats(y_data[split_idx..].as_slice(), device).reshape([test_len, 1]);
+        Tensor::<B, 1>::from_floats(&y_data[split_idx..], device).reshape([test_len, 1]);
 
     let test_prices = price_pairs[split_idx..].to_vec();
 

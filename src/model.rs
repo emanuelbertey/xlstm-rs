@@ -99,6 +99,9 @@ pub struct XLstmconfig {
     /// Whether to use bidirectional LSTM
     #[config(default = "false")]
     pub bidirectional: bool,
+    /// Number of heads for mLSTM blocks
+    #[config(default = "4")]
+    pub num_heads: usize,
     /// LSTM type configuration
     #[config(default = "LstmType::SLSTM")]
     pub lstm_type: LstmType,
@@ -106,7 +109,7 @@ pub struct XLstmconfig {
     #[config(default = "true")]
     pub use_projection: bool,
     /// Weight initializer
-    #[config(default = "Initializer::XavierNormal{gain:1.0}")]
+    #[config(default = "Initializer::XavierNormal{gain:0.1}")]
     pub initializer: Initializer,
 }
 
@@ -136,6 +139,7 @@ impl XLstmconfig {
                     self.num_layers,
                     block_type,
                 )
+                .with_num_heads(self.num_heads)
                 .with_dropout(self.dropout)
                 .with_initializer(self.initializer.clone())
                 .init(device)
@@ -158,6 +162,7 @@ impl XLstmconfig {
             output_size: self.output_size,
             num_blocks: self.num_blocks,
             num_layers: self.num_layers,
+            num_heads: self.num_heads,
             dropout: self.dropout,
             use_projection: self.use_projection,
         }
@@ -209,6 +214,8 @@ pub struct XLstm<B: Backend> {
     pub num_blocks: usize,
     /// Number of layers per block
     pub num_layers: usize,
+    /// Number of heads (for mLSTM blocks)
+    pub num_heads: usize,
     /// Dropout probability
     pub dropout: f64,
     /// Whether input projection is used
@@ -309,6 +316,7 @@ impl<B: Backend> XLstm<B> {
         println!("  Output size: {}", self.output_size);
         println!("  Layers per block: {}", self.num_layers);
         println!("  Number of blocks: {}", self.num_blocks);
+        println!("  Heads (mLSTM): {}", self.num_heads);
         println!("  Dropout: {}", self.dropout);
         println!("  Use input projection: {}", self.use_projection);
         println!("\nBlock Configuration:");
@@ -352,15 +360,12 @@ impl<B: AutodiffBackend> XLstm<B> {
         ids
     }
 
+    /// Get all parameter IDs for the model
+    pub fn get_all_param_ids(&self) -> alloc::vec::Vec<ParamId> {
+        burn::module::list_param_ids(self)
+    }
+
     /// Apply optimizer step with per-block learning rates
-    ///
-    /// # Arguments
-    /// * `lr_config` - Learning rate configuration
-    /// * `optimizer` - The optimizer to use
-    /// * `grads` - Gradients for all parameters
-    ///
-    /// # Returns
-    /// * Updated model
     pub fn optimizer_step<O: Optimizer<Self, B>>(
         self,
         lr_config: &LearningRateConfig,
@@ -371,6 +376,7 @@ impl<B: AutodiffBackend> XLstm<B> {
             LearningRateConfig::Uniform(lr) => {
                 // Simple case: single learning rate for everything
                 let grads_params = GradientsParams::from_grads(grads, &self);
+
                 optimizer.step(*lr, self, grads_params)
             }
             LearningRateConfig::PerBlockType {
@@ -453,6 +459,7 @@ mod tests {
     fn test_xlstm_forward() {
         let device = Default::default();
         let config = XLstmconfig::new(64, 128, 2, 4, 32)
+            .with_num_heads(4)
             .with_dropout(0.1)
             .with_lstm_type(LstmType::Alternate);
 
