@@ -8,7 +8,7 @@ $env:RUST_BACKTRACE=1; cargo run --release --bin mlstmchat -- input.txt
 
 $env:RUST_BACKTRACE=1; cargo run --release --bin xlstmchat -- input.txt
 
-$env:RUST_BACKTRACE=1; cargo run --release --bin slstmchat -- input.txt
+$env:RUST_BACKTRACE=1; cargo run --release --bin slstmchat -- dataset.txt
 
 
 cargo run --release --bin mlstmchat -- input.txt

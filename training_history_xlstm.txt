@@ -68,3 +68,43 @@ SIO:
 ====================================================
 
 
+====================================================
+ÉPOCA: 3 | LOSS: 4.0277 | ACC: 20.93%
+SEMILLA:  hire;
+I
+----------------------------------------------------
+ hire;
+I'll have first, I have
+The merming to my bright
+Theret
+PET:
+Thenewed;
+And I have have
+That, thou art not accads;
+Theremin, and duts, and but I'll
+And I will I will not
+The find.
+
+LUCPRIA:
+I'll belt
+
+====================================================
+
+
+====================================================
+ÉPOCA: 4 | LOSS: 3.8439 | ACC: 22.38%
+SEMILLA:  something good
+----------------------------------------------------
+ something good
+And I am a smin.
+
+DRIARWICK:
+And incleep; for accewe,
+Theny, thou denerry,
+And I have falk, sir, I am a matientio;
+And sound, and brawied;
+Away, and I'll bea,
+Shough to be awe's
+====================================================
+
+

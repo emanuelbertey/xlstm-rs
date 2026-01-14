@@ -1,0 +1,56 @@
+====================================================
+ÉPOCA: 1 | LOSS: 6.1392 | ACC: 7.38%
+SEMILLA: Your brother is a for
+----------------------------------------------------
+Your brother is a for:and:I,.Secondd:I:I,I'd,my:I:,And:I,and's:I'sand's,I,I:and'd:I,I,,And,And:I's.I:and,,I:and's's,I.What.We,,And,And:',I'd's:And:and,I;and,I,
+====================================================
+
+
+====================================================
+ÉPOCA: 2 | LOSS: 5.8769 | ACC: 9.26%
+SEMILLA: I pray God make thee
+----------------------------------------------------
+I pray God make thee,and'll;I,andyou's,Thats.I's,andbe:and,I:I'dinthed'd.I,and;ands,but.What,I'syou.Ihavethemy's,I's:I:O,andyou,andyou.What,I.You;And:And,and's,I'll,I,and'd,and,I'
+====================================================
+
+
+====================================================
+ÉPOCA: 3 | LOSS: 5.6568 | ACC: 10.69%
+SEMILLA: def end yourself By cal
+----------------------------------------------------
+def end yourself By cal,That't.Good'llthest,butmetomylord,I's,I'd:I'd:Iwillnot,Iwillnot:Ihavethew;Ihavea:Ihavetheme.Ihavethey;and'd.I.I'd;Ihavea,Andyou?Iwill,Andyou,and,I's:I's,and,I,I'd,butandyou
+====================================================
+
+
+====================================================
+ÉPOCA: 4 | LOSS: 5.4657 | ACC: 11.83%
+SEMILLA: we are ri d of
+----------------------------------------------------
+we are ri d ofyoury,that'd.IfI'd,IamI's,Ihaveyou,I'd,Andto's,And,And,mylord,andmylord:I'll,And,andyou.Well,and'syoutome,that's.Goodoftheble:What,And,andIhaves,Ands;Andyou,andbetotheworld,butand,Andnot,andtheble,
+====================================================
+
+
+====================================================
+ÉPOCA: 5 | LOSS: 5.3030 | ACC: 12.97%
+SEMILLA: What are your offi ces
+----------------------------------------------------
+What are your offi ces,andbenoe,Andbe,andI't,sir,and,Iwillandmybrother,sir,And,Ihaved;ThatI't.Whatismylord.First,And,and,Ihavemylord,mylord.I's,And,andyou,Iam,And,andyou,Andnot;Andnot,whatI's,Iam,and,andyou.KINGare,Thatyou,Iwill
+====================================================
+
+
+====================================================
+ÉPOCA: 6 | LOSS: 5.1592 | ACC: 14.02%
+SEMILLA: ' d to - day
+----------------------------------------------------
+' d to - day,and,sir.KINGRICHARDms,IhaveyoushallbeI's,I'd.I'd.Pistheworld,andso,I'dintheved.Whatisyourb,mylord,andI'dthewed,Ihaveitisaword;Andyou,andaman,Iwillnot,And,and'll,andyouhaves,IamIwillnot,Iamtheworld's,
+====================================================
+
+
+====================================================
+ÉPOCA: 7 | LOSS: 5.0332 | ACC: 14.86%
+SEMILLA: not four te en p
+----------------------------------------------------
+not four te en pnot,andyouhaves;I'dtheking.Seconden;For't.KINGRICHARDm:IwillIam,Ihavemylord,heisnot.KINGRICHARDII:Ihaveab,Ihaves,IamIwillhe's,Iam,Thatnotwithaman:But,andyouhaveaeatofyou,andbeno:I's.ISABELLA:Iknowthehbe,andbe,That,
+====================================================
+
+
