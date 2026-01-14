@@ -108,3 +108,101 @@ Shough to be awe's
 ====================================================
 
 
+<<<<<<< HEAD
+====================================================
+ÉPOCA: 5 | LOSS: 3.7130 | ACC: 23.45%
+SEMILLA: rer,
+A
+----------------------------------------------------
+rer,
+And silixty.
+
+PRINCENTIO:
+If I am a cuts, I can know it;
+And he is not, I know,
+And I will be foul,
+And in this hory.
+
+HORKALUS:
+That, I'll have mistow
+The chold me the master and in the tazen,
+And I have
+====================================================
+
+
+====================================================
+ÉPOCA: 6 | LOSS: 3.6079 | ACC: 24.43%
+SEMILLA: STA:
+W
+----------------------------------------------------
+STA:
+We, and you have first:
+I will not a covership, if you shall
+I am he is not full of your brother,
+And since and besty.
+
+GRADUS:
+Ay, for the world's a bid
+And I am a false.
+
+PETRUCHIO:
+The mistress and douch of the temn.
+
+H
+====================================================
+
+
+====================================================
+ÉPOCA: 7 | LOSS: 3.5188 | ACC: 25.33%
+SEMILLA:  good my lord;
+
+----------------------------------------------------
+ good my lord;
+And help'd, my lord.
+
+CEONTES:
+I'll craigns to make a craved,
+Who, if though I have not,
+With accason, I am not,
+Away with the master and I'll have first
+Of you, sir, sir, sir,
+But, I am accock,
+With his horse a sorrows,
+====================================================
+
+
+====================================================
+ÉPOCA: 1 | LOSS: 3.4704 | ACC: 25.98%
+SEMILLA:  holy order
+----------------------------------------------------
+ holy order:
+As I have been to the world;
+And then I'll do chall in this fellow,
+Why, thou art a creathey,
+And so much, my body and
+theded, sir, I'll tell you to belazed
+The temns, I'll hearing.
+
+PETRUCHIO:
+And I, I will not be so, and
+====================================================
+
+
+====================================================
+ÉPOCA: 1 | LOSS: 3.4119 | ACC: 26.76%
+SEMILLA:  I will raise her
+----------------------------------------------------
+ I will raise her,
+The singhile, and he hath while
+I will make a cause to change,
+And if thou but bid you shall not to cairth
+The doubby, sir, thou art a
+thee'st, sir, I know, I will,
+And biding young and duty and
+To be a slects, thou art,
+I
+====================================================
+
+
+=======
+>>>>>>> 5d1abb0c2ca1c86786be9210a57c232a052d8e29

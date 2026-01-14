@@ -457,6 +457,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             for batch_idx in 0..num_batches {
                 let current_batch_start_seq = batch_idx * batch_size;
                 let current_batch_size = (batch_size).min(num_actual_sequences - current_batch_start_seq);
+               //bach
+                let mut current_state = None; 
 
                 if current_batch_size == 0 {
                     break;
@@ -472,9 +474,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &device,
                 );
 
-                // Forward pass
-                let (logits, _) = model.forward(input_batch.clone(), None);
 
+
+                // Forward pass
+                //let (logits, lout) = model.forward(input_batch.clone(), current_state.clone());
+                // use out pero es caro 
+               
+               if batch_idx == 0 {
+                // Hacemos un forward silencioso para llenar las matrices del mLSTM
+                let (_, warm_state) = model.predict_last(input_batch.clone(), None);
+                current_state = Some(warm_state);
+                println!("> Estado inicializado con éxito en el Batch 0");
+            }
+                let (logits, next_state) = model.forward(input_batch.clone(), current_state);
+                current_state = Some(next_state.clone());
                 // --- OPTIMIZACIÓN: COSTE Y ACCURACY NATIVOS SOBRE TODA LA SECUENCIA ---
                 
                 // Aplanar para cálculo eficiente

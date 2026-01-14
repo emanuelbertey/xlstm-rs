@@ -27,10 +27,15 @@ use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+
+
 use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
 use tokenizers::pre_tokenizers::whitespace::Whitespace;
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
 use tokenizers::models::TrainerWrapper;
+use tokenizers::pre_tokenizers::byte_level::ByteLevel;
+use tokenizers::decoders::byte_level::ByteLevel as ByteLevelDecoder;
+
 use xlstm::{LearningRateConfig, LstmType, XLstm, XLstmconfig};
 
 type MyBackend = Autodiff<NdArray>;
@@ -105,6 +110,7 @@ impl Tokenizer {
         self.tokenizer.id_to_token(id as u32)
     }
 }
+
 
 /// Crea un batch de entrenamiento (one-hot) de forma eficiente usando una matriz identidad
 fn create_batch<B: AutodiffBackend>(
@@ -199,7 +205,11 @@ where
     indices[0]
 }
 
-/// Genera texto usando el modelo entrenado
+
+
+/// Genera texto de forma recurrente manteniendo el estado interno del modelo
+/// Genera texto de forma recurrente manteniendo el estado interno de la mLSTM
+/// Genera texto de forma recurrente manteniendo el estado interno de la mLSTM
 fn generate_text<B: Backend>(
     model: &XLstm<B>,
     tokenizer: &Tokenizer,
@@ -215,40 +225,66 @@ where
     let seed_tokens = tokenizer.encode(seed_text);
     
     if seed_tokens.is_empty() {
-        println!("Advertencia: El texto semilla no contiene caracteres válidos");
         return current_text;
     }
 
-    let mut context = seed_tokens;
     let eye = Tensor::<B, 2>::eye(vocab_size, device);
+    
+    // 1. IMPORTANTE: No definas el tipo de current_state. 
+    // Al ser una variable local, Rust infiere el tipo privado de la librería automáticamente.
+    let mut current_state = None; 
+    let mut current_tokens = seed_tokens;
 
-    for _ in 0..length {
-        // Usar un contexto que coincida con el entrenamiento (32 palabras)
-        let context_len = context.len().min(32);
-        let start_idx = context.len().saturating_sub(context_len);
-        let input_tokens = &context[start_idx..];
- 
+    for i in 0..length {
+        // En el primer paso (i == 0) procesamos toda la semilla para inicializar la memoria.
+        // Después, solo procesamos el último token generado para mantener eficiencia O(1).
+        let tokens_to_process = if i == 0 {
+            current_tokens.clone()
+        } else {
+            vec![*current_tokens.last().unwrap()]
+        };
+
+        let seq_len = tokens_to_process.len();
         let indices = Tensor::<B, 1, burn::tensor::Int>::from_data(
-            TensorData::new(input_tokens.iter().map(|&t| t as i64).collect(), [context_len]),
+            TensorData::new(tokens_to_process.iter().map(|&t| t as i64).collect(), [seq_len]),
             device,
         );
- 
+
         let input = eye.clone()
             .select(0, indices)
-            .reshape([1, context_len, vocab_size]);
- 
-        let (logits, _) = model.predict_last(input, None);
-        // Usar temperatura 0.8 para dar variedad y evitar bucles
-        let next_token = sample_from_logits(logits, 0.8);
- 
-        context.push(next_token);
-        if let Some(t) = tokenizer.id_to_token(next_token) {
-            current_text.push_str(&t);
-        }
-    }
+            .reshape([1, seq_len, vocab_size]);
 
-    current_text
-}
+        // 2. Ejecutamos el forward directamente aquí.
+        // next_state recibe el Vec interno, pero no necesitamos nombrarlo.
+        let (output, next_state) = model.forward(input, current_state);
+        
+        // 3. Actualizamos el estado para la siguiente palabra.
+        // forward devuelve Vec<...>, así que lo envolvemos en Some para la entrada de la siguiente vuelta.
+        current_state = Some(next_state);
+
+        // 4. Extraemos el último paso de los logits
+        let dims = output.dims();
+        let last_logits = output
+            .slice([0..1, (dims[1] - 1)..dims[1], 0..dims[2]])
+            .reshape([1, dims[2]]);
+
+        // 5. Muestreo con temperatura y Top-K
+        let next_token = sample_from_logits(last_logits, 0.8);
+
+        current_tokens.push(next_token);
+        if let Some(t) = tokenizer.id_to_token(next_token) {
+                    // --- AQUÍ LA REGLA PARA ARREGLAR SALTOS Y ESPACIOS ---
+                    let clean_token = t
+                        .replace("Ċ", "\n") // Convierte el token de salto en un Enter real
+                        .replace("Ġ", " ");  // Convierte el token de espacio en un espacio real
+                    
+                    current_text.push_str(&clean_token);
+                }
+            }
+
+            current_text
+        }
+
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("xLSTM Text Generation con Tokenizador");
@@ -264,11 +300,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let text_file = &args[1];
-    let tokenizer_path = "tokenizer.json";
+    let tokenizer_path = "tokenizer_slstm.json";
     let model_path = "xlstm_chat_model_slstm";
 
     // Intentar leer vocab_size de argumentos o usar 2000 por defecto
-    let target_vocab_size = 1024;
+    let target_vocab_size = 2048;
 
     // Cargar o crear tokenizador
     let tokenizer = if Path::new(tokenizer_path).exists() {
@@ -411,13 +447,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // Training loop
         let num_batches = num_actual_sequences.div_ceil(batch_size);
-
+        
         for epoch in 0..num_epochs {
             let mut total_loss = 0.0f32;
             let mut num_losses = 0;
             let mut correct = 0;
             let mut total = 0;
-
+            let mut current_state = None; 
             for batch_idx in 0..num_batches {
                 let current_batch_start_seq = batch_idx * batch_size;
                 let current_batch_size = (batch_size).min(num_actual_sequences - current_batch_start_seq);
@@ -425,7 +461,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if current_batch_size == 0 {
                     break;
                 }
-
+                if current_batch_size < batch_size {
+                    println!("\n -> Saltando último batch incompleto ({}) para evitar error de dimensiones.", current_batch_size);
+                    break; 
+                }
                 // Generar batch instantáneo (usando Inner Backend para ahorrar RAM)
                 let (input_batch, target_batch) = create_batch::<MyBackend>(
                     &tokens,
@@ -437,8 +476,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 );
 
                 // Forward pass
-                let (logits, _) = model.forward(input_batch.clone(), None);
-
+                let (logits, next_state) = model.forward(input_batch.clone(), current_state);
+                current_state = Some(next_state);
                 // --- OPTIMIZACIÓN: COSTE Y ACCURACY NATIVOS SOBRE TODA LA SECUENCIA ---
                 
                 // Aplanar para cálculo eficiente
