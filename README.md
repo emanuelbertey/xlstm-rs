@@ -66,3 +66,13 @@ Distribución de las predicciones respecto a la línea ideal (y=x).
 ---
 
 Official Repository: [https://github.com/thmasq/xlstm-rs](https://github.com/thmasq/xlstm-rs)
+
+---
+
+### Personal Project / Proyecto Personal: **Laurelia**
+For a more advanced implementation focused on LLMs and Chatbots using the **Hugging Face Candle** framework, check out:
+Para una implementación más avanzada enfocada en LLMs y Chatbots usando el framework **Candle** de Hugging Face, visita:
+
+**[Laurelia (emanuelbertey/LaurelIA)](https://github.com/emanuelbertey/LaurelIA.git)**
+*Uses advanced optimization techniques such as fused projections, matrix memory normalization, and parallel kernels.*
+*Utiliza técnicas avanzadas de optimización como proyecciones fusionadas, normalización de memoria matricial y kernels paralelos.*
