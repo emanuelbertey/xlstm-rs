@@ -193,6 +193,3 @@ impl<B: Backend> XLstmblock<B> {
         }
     }
 }
-
-
-

@@ -19,16 +19,17 @@ use burn::{
     optim::AdamConfig,
     record::{CompactRecorder, Recorder},
     tensor::{activation::softmax, Tensor, backend::{AutodiffBackend, Backend}},
+    nn::loss::CrossEntropyLossConfig,
 };
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
-use burn_wgpu::{Wgpu, WgpuDevice};
+//use burn_wgpu::{Wgpu, WgpuDevice};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
-
+use burn_ndarray::NdArray;  //use burn::backend::{Autodiff, NdArray};
 use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
 use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
 use tokenizers::tokenizer::Tokenizer as HFTokenizer;
@@ -36,8 +37,8 @@ use tokenizers::models::TrainerWrapper;
 use std::collections::HashSet;
 
 use xlstm::{LearningRateConfig, LstmType, XLstm, XLstmconfig};
-
-type MyBackend = Autodiff<Wgpu<f32, i32>>;
+type MyBackend = Autodiff<NdArray<f32>>;
+//type MyBackend = Autodiff<Wgpu<f32, i32>>;
 
 /// Tokenizador profesional usando la librería 'tokenizers' de Hugging Face
 pub struct Tokenizer {
@@ -142,8 +143,8 @@ fn create_batch<B: AutodiffBackend>(
     for i in 0..batch_size {
         let current_start = start_idx + i * stride; // FIX: Multiply by stride
         for j in 0..seq_length {
-            x_indices.push(tokens[current_start + j] as i32);
-            y_indices.push(tokens[current_start + j + 1] as i32);
+            x_indices.push(tokens[current_start + j] as i64);
+            y_indices.push(tokens[current_start + j + 1] as i64);
         }
     }
 
@@ -276,7 +277,7 @@ where
 
         let seq_len = tokens_to_process.len();
         let indices = Tensor::<B, 1, burn::tensor::Int>::from_data(
-            TensorData::new(tokens_to_process.iter().map(|&t| t as i32).collect(), [seq_len]),
+            TensorData::new(tokens_to_process.iter().map(|&t| t as i64).collect::<Vec<i64>>(), [seq_len]),
             device,
         );
 
@@ -349,7 +350,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let text_file = &args[1];
     let tokenizer_path = "tokenizer.json";
-    let model_path = "xlstm_chat_model_mlstm";
+    let model_path = "SLSTMCHAT";
 
     // Intentar leer vocab_size de argumentos o usar 2000 por defecto
     let target_vocab_size = 1024;
@@ -402,8 +403,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  Epochs: {}\n", num_epochs);
 
     // Device
-    let device = WgpuDevice::default();
-
+   // let device = WgpuDevice::default();
+    let device = Default::default();
     // Configuración del modelo - vocab_size es el input_size (one-hot)
    // let config = XLstmconfig::new(vocab_size, hidden_size, num_layers, num_blocks, output_size)
      //   .with_dropout(dropout)
@@ -496,6 +497,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Training loo
         let num_batches = num_actual_sequences.div_ceil(batch_size);
 
+        // Initialize Loss
+        let loss_fn = CrossEntropyLossConfig::new().init(&device);
+
         for epoch in 0..num_epochs {
             let mut total_loss = 0.0f32;
             let mut num_losses = 0;
@@ -524,22 +528,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Forward pass
                 let (logits, _) = model.forward(input_batch.clone(), None);
 
-                // --- OPTIMIZACIÓN: COSTE Y ACCURACY NATIVOS SOBRE TODA LA SECUENCIA ---
+                // --- OPTIMIZACIÓN: COSTE Y ACCURACY NATIVOS ---
                 
                 // Aplanar para cálculo eficiente
                 let logits_flat = logits.reshape::<2, _>([current_batch_size * seq_length, vocab_size]);
                 let target_flat = target_batch.reshape::<1, _>([current_batch_size * seq_length]);
 
-                // Usar inner backend para los targets para que no consuman memoria de gradientes
-                let eye_inner = Tensor::<Wgpu<f32, i32>, 2>::eye(vocab_size, &device);
-                let target_one_hot = Tensor::<MyBackend, 2>::from_inner(
-                    eye_inner.select(0, target_flat.clone().inner())
-                             .reshape([current_batch_size * seq_length, vocab_size])
-                );
-
-                // 2. Calcular Cross-Entropy nativo sobre toda la secuencia
-                let log_probs = (softmax(logits_flat.clone(), 1) + 1e-10).log();
-                let loss_tensor = -(target_one_hot * log_probs).sum_dim(1).mean();
+                // Usar CrossEntropyLoss nativo de Burn (evita one-hot y es más estable)
+                let loss_tensor = loss_fn.forward(logits_flat.clone(), target_flat.clone());
                 
                 let loss_f32 = loss_tensor.clone().into_data().as_slice::<f32>().unwrap()[0];
                 total_loss += loss_f32;
@@ -548,7 +544,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // 3. Calcular Accuracy nativo sobre toda la secuencia
                 let predicted_indices = logits_flat.argmax(1).reshape([current_batch_size * seq_length]);
                 let matches = predicted_indices.equal(target_flat);
-                let correct_batch = matches.int().sum().into_data().as_slice::<i32>().unwrap()[0];
+                let correct_batch = matches.int().sum().into_data().as_slice::<i64>().unwrap()[0];
                 
                 correct += correct_batch as usize;
                 total += current_batch_size * seq_length;
