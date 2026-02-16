@@ -209,22 +209,26 @@ impl<B: Backend> MLstmcell<B> {
     ) -> Self {
         let mut bias_data = alloc::vec![0.0; 3 * num_heads];
         for i in 0..num_heads {
-            bias_data[i] = -3.0; // Input gate bias (start small)
-            bias_data[i + num_heads] = 3.0; // Forget gate bias (start high to remember)
+            bias_data[i] = 0.0;             // Input gate: Neutral
+            bias_data[i + num_heads] = 1.0;  // Forget gate: Start with decay (exp(-1) ~ 0.36)
         }
         let bias = Tensor::from_floats(bias_data.as_slice(), device);
 
+        // Initialize Q, K, V with smaller gain for stability (1/sqrt(head_dim))
+        let head_dim = hidden_size / num_heads;
+        let gain = 0.2;
+        
         let w_q = LinearConfig::new(input_size, hidden_size)
             .with_bias(false)
-            .with_initializer(Initializer::XavierNormal { gain: 1.0 })
+            .with_initializer(Initializer::XavierNormal { gain })
             .init(device);
         let w_k = LinearConfig::new(input_size, hidden_size)
             .with_bias(false)
-            .with_initializer(Initializer::XavierNormal { gain: 1.0 })
+            .with_initializer(Initializer::XavierNormal { gain })
             .init(device);
         let w_v = LinearConfig::new(input_size, hidden_size)
             .with_bias(false)
-            .with_initializer(Initializer::XavierNormal { gain: 1.0 })
+            .with_initializer(Initializer::XavierNormal { gain: 1.0 }) // V can be standard
             .init(device);
         let weight_ih = initializer.init_with(
             [3 * num_heads, input_size],
@@ -355,31 +359,56 @@ impl<B: Backend> MLstmcell<B> {
         
         // --- Numerator (C_t @ q_t) ---
         // h_parallel = sum_k weights[t, k] * (q_t @ k_k^T) * v_k
+       
+       /*
         // 1. Producto punto q * k_k^T para todas las combinaciones t, k
         let qk = q.clone().matmul(k.clone().swap_dims(2, 3)); // [B, H, S, S]
-        
+        */
+        // 1. Producto punto q * k_k^T con escalado de estabilidad
+        let head_dim_f = head_dim as f32;
+        let scale = 1.0 / head_dim_f.sqrt(); 
+
+        let qk = q.clone().matmul(k.clone().swap_dims(2, 3)) * scale;///
+
         // 2. Aplicamos los pesos de decaimiento escalares a las puntuaciones de atención
-        let attention_scores = weights.clone() * qk.clone(); // [B, H, S, S]
-        
+        // baseline let attention_scores = weights.clone() * qk.clone(); // [B, H, S, S]
+        let attention_scores = weights.clone() * qk; // [B, H, S, S]
+       
+       
         // 3. Resultado final con valores v
         let h_parallel = attention_scores.clone().matmul(v.clone()); // [B, H, S, D]
         
-        // 4. Contribución del estado inicial (Doblamos escalas para matrices)
-        // h_0 = weights_initial * (C_0 @ q)  --> USAMOS (C_0 @ q)^T = q^T @ C_0^T
-        let h_initial = q.clone().matmul(state.cell.clone().swap_dims(2, 3)) * initial_scale.clone();
-        
+        // 4. Contribución del estado inicial (PAPER ACCURATE)
+        // h_0 = weights_initial * (C_0 @ q_t)
+        // q es [B, H, S, D], Cell es [B, H, D, D].
+        // Matmul(q, Cell.transpose) -> [B, H, S, D]
+       // baseline  let h_initial = q.clone().matmul(state.cell.clone().swap_dims(2, 3)) * initial_scale.clone();
+        let h_initial = (q.clone() * scale).matmul(state.cell.clone().swap_dims(2, 3)) * initial_scale.clone();
         // --- Denominator (n_t^T @ q_t) ---
         // n_parallel = sum_k weights[t, k] * k_k
         let n_parallel = weights.clone().matmul(k.clone()); // [B, H, S, D]
         let n_dot_q_parallel = (n_parallel * q.clone()).sum_dim(3).reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]); // [B, H, S, 1]
         
-        // n_initial_dot_q = weights_initial * (q @ n_0)
+       /* // n_initial_dot_q = weights_initial * (q @ n_0)
         let n_initial_dot_q = (q.clone() * state.normalizer.clone().reshape::<4, _>([batch_size, self.num_heads, 1, head_dim]))
             .sum_dim(3).reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]) * initial_scale.clone();
         
         let denominator = n_dot_q_parallel + n_initial_dot_q;
-        
+        */
+       // n_initial_dot_q = weights_initial * ( (q * scale) @ n_0 )
+        let n_initial_dot_q = ((q.clone() * scale) * state.normalizer.clone().reshape::<4, _>([batch_size, self.num_heads, 1, head_dim]))
+        .sum_dim(3)
+        .reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]) * initial_scale.clone();
+
+        let denominator = n_dot_q_parallel + n_initial_dot_q;
+
         // Estabilización final escalar (PAPER ACCURATE: max(|n^T q|, 1))
+        /*// Debug: Quitamos el max(1) que pisa la señal y usamos epsilon
+        let epsilon = 1e-6;
+        let denominator_stable = denominator.abs() + epsilon; 
+
+        let h_normalized = (h_parallel + h_initial) / denominator_stable;*/
+
         let ones = Tensor::ones_like(&denominator);
         let denominator_stable = denominator.abs().max_pair(ones); 
         
@@ -470,10 +499,9 @@ impl<B: Backend> MLstmcell<B> {
         let n_new = normalizer * f_stable.clone().reshape::<3, _>([batch_size, self.num_heads, 1]).expand([batch_size, self.num_heads, head_dim]) 
                   + k.reshape::<3, _>([batch_size, self.num_heads, head_dim]) * i_stable.clone().reshape::<3, _>([batch_size, self.num_heads, 1]).expand([batch_size, self.num_heads, head_dim]);
 
-        // --- Numerator (Eq. 9/11): h_tilde = C_t @ q_t ---
-        // c_new es [B, H, D, D], q es [B, H, 1, D]
-        // MatMul(C, q^T) -> [B, H, D, 1]
-        let h_heads = c_new.clone().matmul(q.clone().swap_dims(2, 3)).squeeze::<3>(3); // [B, H, D]
+        // Numerador: h_tilde = C_t @ q_t
+        // q_step es [B, H, 1, D], c_new es [B, H, D, D]
+        let h_heads = q.clone().matmul(c_new.clone().swap_dims(2, 3)).squeeze::<3>(2); // [B, H, D]
         
         // Denominador escalar (Paper Eq. 13): n_t^T * q_t
         let q_step = q.reshape::<3, _>([batch_size, self.num_heads, head_dim]);

@@ -375,13 +375,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let seq_length = 128; 
     let batch_size = 16; 
-    let stride = 64;     
+    let stride = 128;     
     let num_epochs = 50;
     let num_heads = 4;
     // Learning rates por bloque (igual que main.rs)
     let lr_config = LearningRateConfig::per_block_type(
         5e-4, // sLSTM learning rate
-        3e-4, // mLSTM learning rate
+        1e-3, // mLSTM learning rate
         5e-4, // Other components learning rate
     );
 
@@ -407,7 +407,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_dropout(dropout)
         .with_num_heads(num_heads)
         //.with_lstm_type(LstmType::Alternate)
-        .with_lstm_type(LstmType::MLSTM) //::SLSTM ::SLSTM<--- Forzar solo mLSTM
+        .with_lstm_type(LstmType::SLSTM) //::SLSTM ::SLSTM<--- Forzar solo mLSTM
         .with_use_projection(true);   
 
     // Verificar si existe un modelo guardado (una sola vez)
@@ -487,81 +487,66 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Training loop - Solo procesar baches COMPLETOS para evitar errores de dimensión
         let num_batches = num_actual_sequences / batch_size; 
 
-        for epoch in 0..num_epochs {
+         for epoch in 0..num_epochs {
             let mut total_loss = 0.0f32;
             let mut num_losses = 0;
             let mut correct = 0;
             let mut total = 0;
-            let mut current_state = None;
 
             for batch_idx in 0..num_batches {
                 let current_batch_start_seq = batch_idx * batch_size;
+                let current_batch_size = (batch_size).min(num_actual_sequences - current_batch_start_seq);
                 let epoch_start = Instant::now();
+                if current_batch_size == 0 {
+                    break;
+                }
 
-                // Generar batch (siempre de tamaño batch_size completo)
+                // Generar batch instantáneo (usando Inner Backend para ahorrar RAM)
                 let (input_batch, target_batch) = create_batch::<MyBackend>(
                     &tokens,
                     current_batch_start_seq * stride,
-                    batch_size,
+                    current_batch_size,
                     seq_length,
-                    stride,
+                    stride, // Pass stride
                     vocab_size,
                     &device,
                 );
 
-                // --- DEBUG: Imprimir el texto del primer batch ---
-                if epoch == 0 && batch_idx == 0 {
-                    println!("\n[DEBUG] Contenido del Primer Batch (Texto real):");
-                    let start_idx = current_batch_start_seq * stride;
-                    for b in 0..batch_size {
-                        let seq_start = start_idx + b * stride;
-                        let seq_tokens = &tokens[seq_start..seq_start + seq_length];
-                        let seq_text = tokenizer.decode(seq_tokens);
-                        println!("Secuencia {}: \"{}\"", b, seq_text);
-                    }
-                    println!("[FIN DEBUG]\n");
-                }
+                // Forward pass
+                let (logits, _) = model.forward(input_batch.clone(), None);
 
-                // Forward pass con estado persistente (Memoria entre baches)
-                let (logits, next_state) = model.forward(input_batch.clone(), current_state);
-                
-                // Desconectar gradientes para el siguiente paso (Evita explosión de RAM)
-                current_state = Some(next_state.into_iter().map(|s| {
-                    s.map(|inner_s| inner_s.detach())
-                }).collect());
+                // --- OPTIMIZACIÓN: COSTE Y ACCURACY NATIVOS SOBRE TODA LA SECUENCIA ---
                 
                 // Aplanar para cálculo eficiente
-                let logits_flat = logits.reshape::<2, _>([batch_size * seq_length, vocab_size]);
-                let target_flat = target_batch.reshape::<1, _>([batch_size * seq_length]);
+                let logits_flat = logits.reshape::<2, _>([current_batch_size * seq_length, vocab_size]);
+                let target_flat = target_batch.reshape::<1, _>([current_batch_size * seq_length]);
 
                 // Usar inner backend para los targets para que no consuman memoria de gradientes
                 let eye_inner = Tensor::<Wgpu<f32, i32>, 2>::eye(vocab_size, &device);
                 let target_one_hot = Tensor::<MyBackend, 2>::from_inner(
                     eye_inner.select(0, target_flat.clone().inner())
-                             .reshape([batch_size * seq_length, vocab_size])
+                             .reshape([current_batch_size * seq_length, vocab_size])
                 );
 
-                // 2. Calcular Cross-Entropy estable (logits_flat está en [N, V])
-                let loss_tensor = burn::tensor::loss::cross_entropy_with_logits(logits_flat.clone(), target_one_hot);
+                // 2. Calcular Cross-Entropy nativo sobre toda la secuencia
+                let log_probs = (softmax(logits_flat.clone(), 1) + 1e-10).log();
+                let loss_tensor = -(target_one_hot * log_probs).sum_dim(1).mean();
                 
                 let loss_f32 = loss_tensor.clone().into_data().as_slice::<f32>().unwrap()[0];
                 total_loss += loss_f32;
                 num_losses += 1;
 
                 // 3. Calcular Accuracy nativo sobre toda la secuencia
-                let predicted_indices = logits_flat.argmax(1).reshape([batch_size * seq_length]);
+                let predicted_indices = logits_flat.argmax(1).reshape([current_batch_size * seq_length]);
                 let matches = predicted_indices.equal(target_flat);
                 let correct_batch = matches.int().sum().into_data().as_slice::<i32>().unwrap()[0];
                 
                 correct += correct_batch as usize;
-                total += batch_size * seq_length;
+                total += current_batch_size * seq_length;
 
                 // --- FIN OPTIMIZACIÓN ---
 
                 let grads = loss_tensor.backward();
-                
-                let _batch_acc = 100.0 * correct_batch as f32 / (batch_size * seq_length) as f32;
-
                 model = model.optimizer_step(&lr_config, &mut optim, grads);
 
                 // Reportar progreso cada 10 batches para que se vea el movimiento fluido

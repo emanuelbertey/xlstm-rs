@@ -244,7 +244,7 @@ impl<B: Backend> XLstm<B> {
         let mut x = if let Some((linear, norm, dropout)) = &self.input_projection {
             let mut x = linear.forward(input_seq);
             x = norm.forward(x);
-            x = activation::gelu(x);
+            // No GELU here
             dropout.forward(x)
         } else {
             input_seq
@@ -264,7 +264,7 @@ impl<B: Backend> XLstm<B> {
         // Apply output head
         let (linear1, dropout, linear2) = &self.output_head;
         x = linear1.forward(x);
-        x = activation::gelu(x);
+        // No GELU here: let the LSTM features flow directly to the classifier
         x = dropout.forward(x);
         let output = linear2.forward(x);
 
