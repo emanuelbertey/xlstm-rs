@@ -330,7 +330,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vocab_size = tokenizer.vocab_size();
     let hidden_size = 256; // Suficiente para BPE
     let num_layers = 1;//let num_layers = 2;
-    let num_blocks = 3; //let num_blocks = 4;
+    let num_blocks = 1; //let num_blocks = 4;
     let output_size = vocab_size; 
     let dropout = 0.1;
 
@@ -367,7 +367,7 @@ fn main() -> Result<(), Box<dyn Error>> {
      let config = XLstmconfig::new(vocab_size, hidden_size, num_layers, num_blocks, output_size)
         .with_dropout(dropout)
         .with_num_heads(num_heads)
-        .with_lstm_type(LstmType::Alternate)
+        .with_lstm_type(LstmType::SLSTM)
         //.with_lstm_type(LstmType::MLSTM) //::SLSTM ::SLSTM<--- Forzar solo mLSTM
         .with_use_projection(true);   
 

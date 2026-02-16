@@ -28,6 +28,14 @@ impl<B: Backend, const D: usize> SLstmstate<B, D> {
     pub const fn new(cell: Tensor<B, D>, hidden: Tensor<B, D>) -> Self {
         Self { cell, hidden }
     }
+
+    /// Detach the state from the computational graph
+    pub fn detach(self) -> Self {
+        Self {
+            cell: self.cell.detach(),
+            hidden: self.hidden.detach(),
+        }
+    }
 }
 
 /// Configuration for sLSTM

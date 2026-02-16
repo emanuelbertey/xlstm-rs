@@ -11,7 +11,7 @@ burn = { version = "0.18.0", features = ["train", "std", "fusion"] }
 burn-autodiff = "0.18.0"
 burn-fusion = "0.18.0"
 burn-ndarray =  "0.18.0"
-#burn-wgpu = { version = "0.18.0", features = ["vulkan", "cubecl-spirv", "fusion"] }
+burn-wgpu = { version = "0.18.0", features = ["vulkan", "cubecl-spirv", "fusion"] }
 chrono = "0.4.42"
 csv = "1.3.1"
 env_logger = "0.11.8"
@@ -33,7 +33,7 @@ name = "main"
 path = "src/main.rs"
 
 [[bin]]
-name = "mlstmchat"
+name = "mlstmchat1"
 path = "src/msltmchat.rs"
 
 [[bin]]
@@ -47,5 +47,5 @@ path = "src/xlstmchat.rs"
 
 [profile.release]
 #opt-level = 3
-lto = "fat"
+#lto = "fat"
 #codegen-units = 1

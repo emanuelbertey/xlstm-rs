@@ -104,6 +104,20 @@ pub enum LSTMState<B: Backend> {
     MLSTM(alloc::vec::Vec<MLstmstate<B>>),
 }
 
+impl<B: Backend> LSTMState<B> {
+    /// Detach the state from the computational graph
+    pub fn detach(self) -> Self {
+        match self {
+            LSTMState::SLSTM(states) => {
+                LSTMState::SLSTM(states.into_iter().map(|s| s.detach()).collect())
+            }
+            LSTMState::MLSTM(states) => {
+                LSTMState::MLSTM(states.into_iter().map(|s| s.detach()).collect())
+            }
+        }
+    }
+}
+
 /// xLSTM block combining LSTM with normalization and projections
 #[derive(Module, Debug)]
 pub struct XLstmblock<B: Backend> {
