@@ -306,8 +306,8 @@ where
             .reshape([1, dims[2]]);
 
         // 5. Muestreo con temperatura y Top-P/ Top-K
-        // Usamos parámetros conservadores para texto coherente (Top-P 0.9, Top-K 40, Temp 0.8)
-        let next_token = sample_from_logits(last_logits, 0.5, 40, 0.9);
+        // Muestreo equilibrado (Top-P 0.9 para evitar repeticiones, Temp 0.7 para fluidez)
+        let next_token = sample_from_logits(last_logits, 0.7, 40, 0.9);
 
         current_tokens.push(next_token);
         generated_ids.push(next_token);
@@ -375,13 +375,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let seq_length = 128; 
     let batch_size = 16; 
-    let stride = 128;     
+    let stride = 64;     
     let num_epochs = 50;
-    let num_heads = 8;
+    let num_heads = 4;
     // Learning rates por bloque (igual que main.rs)
     let lr_config = LearningRateConfig::per_block_type(
         5e-4, // sLSTM learning rate
-        7e-4, // mLSTM learning rate
+        3e-4, // mLSTM learning rate
         5e-4, // Other components learning rate
     );
 
@@ -492,7 +492,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut num_losses = 0;
             let mut correct = 0;
             let mut total = 0;
-        //    let mut current_state = None;
+            let mut current_state = None;
 
             for batch_idx in 0..num_batches {
                 let current_batch_start_seq = batch_idx * batch_size;
@@ -522,8 +522,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     println!("[FIN DEBUG]\n");
                 }
 
-                // Forward pass - Independencia total entre batches (Ningún sesgo)
-                let (logits, _) = model.forward(input_batch.clone(), None);
+                // Forward pass con estado persistente (Memoria entre baches)
+                let (logits, next_state) = model.forward(input_batch.clone(), current_state);
+                
+                // Desconectar gradientes para el siguiente paso (Evita explosión de RAM)
+                current_state = Some(next_state.into_iter().map(|s| {
+                    s.map(|inner_s| inner_s.detach())
+                }).collect());
                 
                 // Aplanar para cálculo eficiente
                 let logits_flat = logits.reshape::<2, _>([batch_size * seq_length, vocab_size]);

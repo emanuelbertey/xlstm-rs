@@ -13,3 +13,8 @@ $env:RUST_BACKTRACE=1; cargo run --release --bin slstmchat -- input.txt
 
 cargo run --release --bin mlstmchat -- input.txt
 
+cargo test test_mlstm_dual_equivalence -- --nocapture
+
+cargo test test_mlstm_dual_equivalence -- --nocapture
+cargo run --bin dual_test
+

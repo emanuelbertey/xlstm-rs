@@ -11,7 +11,7 @@ allowing for enhanced storage capacities and improved performance on long-range 
 use burn::{
     config::Config,
     module::{Module, Param},
-    nn::{Dropout, DropoutConfig, Initializer, LayerNorm, LayerNormConfig, Linear, LinearConfig},
+    nn::{Dropout, DropoutConfig, Initializer, Linear, LinearConfig},
     tensor::{Tensor, activation, backend::Backend},
 };
 use num_traits::{FromPrimitive, ToPrimitive};
@@ -183,8 +183,6 @@ impl<B: Backend> MLstm<B> {
 pub struct MLstmcell<B: Backend> {
     /// Weight matrix for input to gates
     pub weight_ih: Param<Tensor<B, 2>>,
-    /// Weight matrix for hidden to gates
-    pub weight_hh: Param<Tensor<B, 2>>,
     /// Bias for gates
     pub bias: Param<Tensor<B, 1>>,
     /// Query projection
@@ -193,8 +191,6 @@ pub struct MLstmcell<B: Backend> {
     pub w_k: Linear<B>,
     /// Value projection
     pub w_v: Linear<B>,
-    /// LayerNorm for multi-head normalization
-    pub ln: LayerNorm<B>,
     /// Input size
     pub input_size: usize,
     /// Hidden size
@@ -211,27 +207,10 @@ impl<B: Backend> MLstmcell<B> {
         initializer: &Initializer,
         device: &B::Device,
     ) -> Self {
-        let weight_ih = initializer.init_with(
-            [3 * hidden_size, input_size],
-            Some(input_size),
-            Some(3 * hidden_size),
-            device,
-        );
-        // weight_hh se mantiene para compatibilidad con predict_last, 
-        // pero el kernel paralelo lo ignora para permitir O(1) en tiempo.
-        let weight_hh = initializer.init_with(
-            [3 * hidden_size, hidden_size],
-            Some(hidden_size),
-            Some(3 * hidden_size),
-            device,
-        );
-
-        let mut bias_data = alloc::vec![0.0; 3 * hidden_size];
-        for i in 0..hidden_size {
-            bias_data[i] = 0.0; // Input gate bias
-        }
-        for i in hidden_size..(2 * hidden_size) {
-            bias_data[i] = 1.0; // Forget gate bias (increased to 1.0 for better initial memory)
+        let mut bias_data = alloc::vec![0.0; 3 * num_heads];
+        for i in 0..num_heads {
+            bias_data[i] = -3.0; // Input gate bias (start small)
+            bias_data[i + num_heads] = 3.0; // Forget gate bias (start high to remember)
         }
         let bias = Tensor::from_floats(bias_data.as_slice(), device);
 
@@ -247,18 +226,19 @@ impl<B: Backend> MLstmcell<B> {
             .with_bias(false)
             .with_initializer(Initializer::XavierNormal { gain: 1.0 })
             .init(device);
-
-        let head_dim = hidden_size / num_heads;
-        let ln = LayerNormConfig::new(head_dim).init(device);
+        let weight_ih = initializer.init_with(
+            [3 * num_heads, input_size],
+            Some(input_size),
+            Some(3 * num_heads),
+            device,
+        );
 
         Self {
             weight_ih,
-            weight_hh,
             bias: Param::from_tensor(bias),
             w_q,
             w_k,
             w_v,
-            ln,
             input_size,
             hidden_size,
             num_heads,
@@ -299,64 +279,57 @@ impl<B: Backend> MLstmcell<B> {
 
 
 
-        // 2. Parallel Gates
+        // 2. Parallel Gates (Scalar per head)
         let weight_ih_val = self.weight_ih.val().transpose();
         let bias_val = self.bias.val();
 
-        // Proyección
-        let gates = input_seq.clone().matmul(weight_ih_val.reshape::<3, _>([1, self.input_size, 3 * self.hidden_size])) 
-                    + bias_val.reshape::<3, _>([1, 1, 3 * self.hidden_size]);
+        // Proyección directa a num_heads
+        let gates = input_seq.clone().matmul(weight_ih_val.reshape::<3, _>([1, self.input_size, 3 * self.num_heads])) 
+                    + bias_val.reshape::<3, _>([1, 1, 3 * self.num_heads]);
         
-        let chunks = gates.chunk(3, 2);
-        
-        // Input gate log (no activation, purely log space)
-        let i_log = chunks[0].clone()
-            .reshape::<4, _>([batch_size, seq_len, self.num_heads, head_dim])
-            .swap_dims(1, 2); 
-            //.clamp(-10.0, 10.0); // Opcional: clamp log values if needed for float stability
-            
-        // Forget gate log (no activation)
-        let f_log = chunks[1].clone()
-            .reshape::<4, _>([batch_size, seq_len, self.num_heads, head_dim])
-            .swap_dims(1, 2);
-            //.clamp(-10.0, 10.0);
-            
-        let o = activation::sigmoid(chunks[2].clone()); // [B, S, D_hidden]
+        let i_log = gates.clone().slice([0..batch_size, 0..seq_len, 0..self.num_heads]).swap_dims(1, 2).reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]); // [B, H, S, 1]
+        let f_log = gates.clone().slice([0..batch_size, 0..seq_len, self.num_heads..2*self.num_heads]).swap_dims(1, 2).reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]);
+        let o_gate = activation::sigmoid(gates.clone().slice([0..batch_size, 0..seq_len, 2*self.num_heads..3*self.num_heads]))
+            .swap_dims(1, 2)
+            .reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]); // [B, H, S, 1]
 
-        // Forget Gate according to paper: f_t = sigma(W_f x + b_f) or exp(f_tilde)
-        // Here we use the log-space formulation: f_log = log(sigma(f_tilde)) = -softplus(-f_tilde)
-        // This is numerically stable.
-        let f_log_val = -activation::softplus(-f_log.clone(), 1.0);
+        // Forget gate log-space stable (PAPER ACCURATE: pure log-projection)
+        let f_log_val = f_log; 
         
-        // Use max over head dimensions for m_t calculation to preserve strongest signal (Information Loss Fix)
-        let i_log_m = i_log.max_dim(3); // [B, H, S, 1]
-        let f_log_m = f_log_val.max_dim(3); // [B, H, S, 1]
-
-        // 3. Parallel Stabilization Logic (Log-Space) - CONSOLIDATED & FAITHFUL
-        // Matrix of cumulative products using matmul (Manual CumSum for compatibility)
+        // 3. Parallel Stabilization Logic (Log-Space) - PAPER ACCURATE (10/10)
+        // i_log y f_log ya son escalares por cabeza [B, H, S, 1]
+        let i_log_scalar = i_log; 
+        let f_log_scalar = f_log_val; 
+        
+        // Manual CumSum using triangular matrix: [1, 1, S, S] @ [B, H, S, 1] -> [B, H, S, 1]
         let mask_tri = Tensor::<B, 2>::tril(Tensor::ones([seq_len, seq_len], &device), 0);
-        let f_log_cumsum = mask_tri.clone().reshape::<4, _>([1, 1, seq_len, seq_len]).matmul(f_log_m.clone());
+        let f_log_cumsum = mask_tri.clone().reshape::<4, _>([1, 1, seq_len, seq_len]).matmul(f_log_scalar.clone());
         
-        // Matrix of cumulative forget gates: [B, H, S, S]
+        // Matrix of decay weights in 4D: [B, H, S_t, S_k]
         // log_f_matrix[t, k] = sum_{j=k+1}^t log f_j = F[t] - F[k]
-        let log_f_matrix = f_log_cumsum.clone() - f_log_cumsum.clone().swap_dims(2, 3);
-        let log_weights = log_f_matrix + i_log_m.clone().swap_dims(2, 3);
+        let f_t = f_log_cumsum.clone(); // [B, H, S, 1]
+        let f_k = f_log_cumsum.clone().swap_dims(2, 3); // [B, H, 1, S]
+        let log_f_matrix = f_t - f_k;
         
-        // Causal Masking (strictly boolean for compatibility)
-        let mask_bool = mask_tri.greater(Tensor::zeros([seq_len, seq_len], &device));
-        let log_weights_masked = log_weights.mask_fill(mask_bool.reshape::<4, _>([1, 1, seq_len, seq_len]).bool_not(), -1e30);
+        // log_weights[t, k] = log_f_matrix + i_log[k]
+        let i_k = i_log_scalar.clone().swap_dims(2, 3); // [B, H, 1, S]
+        let log_weights = log_f_matrix + i_k;
         
-        // Initial state contribution: m_0 + sum_{j=1}^t log f_j
+        // Causal Masking
+        let mask_4d = mask_tri.reshape::<4, _>([1, 1, seq_len, seq_len]);
+        let log_weights_masked = log_weights.mask_fill(mask_4d.equal(Tensor::zeros([1, 1, seq_len, seq_len], &device)), -1e30);
+        
+        // Contribución del estado inicial: m_0 + sum log f
         let m_0 = state.max_gate_log.clone().reshape::<4, _>([batch_size, self.num_heads, 1, 1]); 
         let log_initial_contrib = f_log_cumsum.clone() + m_0; // [B, H, S, 1]
         
-        // Final Global Stabilization Value m_t
-        let max_log_seq = log_weights_masked.clone().max_dim(3); // [B, H, S, 1]
-        let m_t = max_log_seq.max_pair(log_initial_contrib.clone()); // [B, H, S, 1]
+        // m_t global = max( max_k(weights), log_initial_contrib )
+        let max_seq = log_weights_masked.clone().max_dim(3); // [B, H, S, 1]
+        let m_t_global = max_seq.max_pair(log_initial_contrib.clone()); // [B, H, S, 1]
         
-        // Stable Exponentials using unique m_t
-        let weights = (log_weights_masked - m_t.clone()).exp(); // [B, H, S, S]
-        let initial_scale = (log_initial_contrib - m_t.clone()).exp(); // [B, H, S, 1]
+        // Exponenciales estables (Escalares por cabeza)
+        let weights = (log_weights_masked - m_t_global.clone()).exp(); // [B, H, S, S]
+        let initial_scale = (log_initial_contrib - m_t_global.clone()).exp(); // [B, H, S, 1]
         
         // --- Compute H and N ---
         
@@ -380,116 +353,66 @@ impl<B: Backend> MLstmcell<B> {
         // So we compute Attention(Q, K, V) with our specific decay weights.
         // weights[t, k] acts as the "attention score" A[t, k].
         
-        // 1. Q @ K^T (Sin escalado 1/sqrt(d), tal como indica el paper)
-        let qk = q.clone().matmul(k.clone().swap_dims(2, 3)); 
+        // --- Numerator (C_t @ q_t) ---
+        // h_parallel = sum_k weights[t, k] * (q_t @ k_k^T) * v_k
+        // 1. Producto punto q * k_k^T para todas las combinaciones t, k
+        let qk = q.clone().matmul(k.clone().swap_dims(2, 3)); // [B, H, S, S]
         
-        // 2. Aplicar pesos de decaimiento
-        let attention_scores = qk * weights.clone(); 
+        // 2. Aplicamos los pesos de decaimiento escalares a las puntuaciones de atención
+        let attention_scores = weights.clone() * qk.clone(); // [B, H, S, S]
         
-        // 3. Resultado final con valores V
-        let h_parallel = attention_scores.matmul(v.clone());
+        // 3. Resultado final con valores v
+        let h_parallel = attention_scores.clone().matmul(v.clone()); // [B, H, S, D]
         
-        // 4. Input State Contribution
-        // h_0 = (Q * C_0) * decay
-        // C_0 is [B, H, D, D]
-        // Q is [B, H, S, D]
-        // Q @ C_0 -> [B, H, S, D]
-        let h_initial = q.matmul(state.cell.clone()) * initial_scale.clone();
+        // 4. Contribución del estado inicial (Doblamos escalas para matrices)
+        // h_0 = weights_initial * (C_0 @ q)  --> USAMOS (C_0 @ q)^T = q^T @ C_0^T
+        let h_initial = q.clone().matmul(state.cell.clone().swap_dims(2, 3)) * initial_scale.clone();
         
-        let h_heads = h_parallel + h_initial;
+        // --- Denominator (n_t^T @ q_t) ---
+        // n_parallel = sum_k weights[t, k] * k_k
+        let n_parallel = weights.clone().matmul(k.clone()); // [B, H, S, D]
+        let n_dot_q_parallel = (n_parallel * q.clone()).sum_dim(3).reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]); // [B, H, S, 1]
         
-        // --- Normalizer ---
-        // n_t = sum_k weights[t, k] * k_k + initial_scale * n_0
-        // weights: [B, H, S, S]
-        // k: [B, H, S, D]
-        // weights @ k -> [B, H, S, D]
-        let n_parallel = weights.clone().matmul(k.clone());
+        // n_initial_dot_q = weights_initial * (q @ n_0)
+        let n_initial_dot_q = (q.clone() * state.normalizer.clone().reshape::<4, _>([batch_size, self.num_heads, 1, head_dim]))
+            .sum_dim(3).reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]) * initial_scale.clone();
         
-        let n_initial = state.normalizer.clone()
-            .reshape::<4, _>([batch_size, self.num_heads, 1, head_dim]) // [B, H, 1, D]
-            .expand::<4, _>([batch_size, self.num_heads, seq_len, head_dim]) 
-            * initial_scale.clone();
-            
-        let n_heads = n_parallel + n_initial;
+        let denominator = n_dot_q_parallel + n_initial_dot_q;
         
-        // --- Output ---
-        // --- Output Normalization (Paper Formula) ---
-        // h_tilde = h_heads / max(|n_heads|, exp(-m_t))
-        // Note: Our n_heads already includes the exp factors.
-        // Wait, the paper formula is:
-        // h_t = (C_t q_t) / max(|n_t^T q_t|, exp(-m_t)) ???
-        // No, standard xLSTM: h_t = (C_t q_t) / n_t
-        // But n_t = sum(a_i) where a_i are positive scalar weights.
-        // For matrix memory: n_t = (sum w_i k_i)^T q_t ? No, n_t is a vector.
-        // Let's stick to the user request: h / max(|n|, exp(-m))
+        // Estabilización final escalar (PAPER ACCURATE: max(|n^T q|, 1))
+        let ones = Tensor::ones_like(&denominator);
+        let denominator_stable = denominator.abs().max_pair(ones); 
         
-        // n_heads here is the denominator term derived parallelly.
-        // n_heads = (sum weights * k)
-        // Normalized h = h_heads / n_heads.
+        let h_normalized = (h_parallel + h_initial) / denominator_stable;
         
-        let m_t_last_col = m_t.clone().slice([0..batch_size, 0..self.num_heads, 0..seq_len, 0..1]); // [B, H, S, 1]
-        let exp_minus_m = (-m_t_last_col).exp();
+        // --- Output Gate (PAPER ACCURATE per head) ---
+        // h_gated = h_normalized * o_gate -> [B, H, S, D] * [B, H, S, 1]
+        let h_gated = h_normalized * o_gate;
         
-        // Broadcast exp_minus_m to head_dim
-        let min_divisor = exp_minus_m.expand([batch_size, self.num_heads, seq_len, head_dim]);
-        
-        // Denominator = max(|n_heads|, exp(-m_t))
-        let denominator = n_heads.clone().abs().max_pair(min_divisor);
-        
-        let h_normalized = h_heads / denominator;
-        
-        let h_reshaped = h_normalized.swap_dims(1, 2); // [B, S, H, D]
-        let h_ln = self.ln.forward(h_reshaped); 
-        let h_combined = h_ln.reshape::<3, _>([batch_size, seq_len, self.hidden_size]);
-        let h_seq = o * h_combined; // Output gating
+        // Recombinar cabezas para la salida final: [B, H, S, D] -> [B, S, Hidden]
+        let h_seq = h_gated.swap_dims(1, 2).reshape::<3, _>([batch_size, seq_len, self.hidden_size]);
 
-        // --- State Update for Next Step ---
-        // We need to return the FULL state at t=seq_len-1 (last step)
+        // --- State Update for Next Step (FAITHFUL TO PAPER) ---
         let last_idx = seq_len - 1;
         
-        // 1. New m_0 for next chunk is the last m_t
-        let final_m = m_t.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..1])
-            .reshape::<3, _>([batch_size, self.num_heads, 1]);
-            
-        // 2. New Normalizer
-        let final_norm = n_heads.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..head_dim])
-            .reshape::<3, _>([batch_size, self.num_heads, head_dim]);
-            
-        // 3. New Cell State
-        // C_T = C_0 * initial_scale[T] + sum_k (v_k k_k^T * weights[T, k])
+        // 1. m_T
+        let final_m = m_t_global.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..1]).reshape::<3, _>([batch_size, self.num_heads, 1]);
         
-        // 3a. Scale old cell
-        let last_scale = initial_scale.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..1]);
-        let cell_initial_contribution = state.cell * last_scale.reshape::<4, _>([batch_size, self.num_heads, 1, 1]);
+        // 2. n_T = exp(F_T - m_T) * n_0 + sum_k (weights[T, k] * k_k)
+        let last_scale = initial_scale.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..1]).reshape::<3, _>([batch_size, self.num_heads, 1]);
+        let n_initial_contrib = state.normalizer * last_scale.clone().expand([batch_size, self.num_heads, head_dim]);
         
-        // 3b. Add new inputs
-        // We need weighted sum of outer products.
-        // S = sum_{k} (w_k * v_k) * k_k^T ?? 
-        // No, C = sum w_k * (v_k @ k_k^T).
-        // = (sum w_k v_k ... k_k) ?
-        // Let's rewrite: C_T = sum_k (w[T, k] * v[k]) @ k[k]^T ?
-        // weights[T, k] is scalar.
-        // We can compute this as: (weights[T] * V)^T @ K ?
-        // weights[T] is [1, S]. V is [S, D].
-        // We want sum_s W_s * V_s^T * K_s
-        // = (V.T * W) @ K.
-        // Yes.
+        let last_weights = weights.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..seq_len]); 
+        let n_parallel_contrib = last_weights.clone().matmul(k.clone()).reshape::<3, _>([batch_size, self.num_heads, head_dim]);
+        let final_norm = n_initial_contrib + n_parallel_contrib;
+
+        // 3. C_T = exp(F_T - m_T) * C_0 + sum_k (weights[T, k] * v_k @ k_k^T)
+        let c_initial_contrib = state.cell * last_scale.clone().reshape::<4, _>([batch_size, self.num_heads, 1, 1]);
         
-        let last_weights = weights.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..seq_len]); // [B, H, 1, S]
-        
-        // V: [B, H, S, D]. 
-        // Swap V to [B, H, D, S]
-        let v_t = v.clone().swap_dims(2, 3);
-        
-        // V_weighted = V_T * weights
-        // [B, H, D, S] * [B, H, 1, S] (broadcast) -> [B, H, D, S]
-        let v_weighted = v_t * last_weights;
-        
-        // C_update = V_weighted @ K
-        // [B, H, D, S] @ [B, H, S, D] -> [B, H, D, D]
-        let cell_update = v_weighted.matmul(k);
-        
-        let final_cell = cell_initial_contribution + cell_update;
+        // sum_k weights[T, k] * (v_k @ k_k^T) --> (v_weighted^T @ k)
+        let v_weighted = v * last_weights.reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]);
+        let c_parallel_contrib = v_weighted.swap_dims(2, 3).matmul(k); 
+        let final_cell = c_initial_contrib + c_parallel_contrib;
 
         (h_seq.clone(), MLstmstate::new(final_cell, h_seq.slice([0..batch_size, last_idx..seq_len, 0..self.hidden_size]).reshape([batch_size, self.hidden_size]), final_norm, final_m))
     }
@@ -514,27 +437,23 @@ impl<B: Backend> MLstmcell<B> {
         let head_dim = self.hidden_size / self.num_heads;
         let _device = input.device();
 
-        // Gates calculation
+        // Gates calculation (Scalar projections per head)
         let gates = input.clone().matmul(self.weight_ih.val().transpose())
-            + self.bias.val().reshape::<2, _>([1, 3 * self.hidden_size]);
+            + self.bias.val().reshape::<2, _>([1, 3 * self.num_heads]);
 
         let chunks = gates.chunk(3, 1);
-        let i_log = chunks[0].clone()
-            .reshape::<4, _>([batch_size, self.num_heads, 1, head_dim]);
-        let f_log = chunks[1].clone()
-            .reshape::<4, _>([batch_size, self.num_heads, 1, head_dim]);
-        let o = activation::sigmoid(chunks[2].clone());
+        let i_log = chunks[0].clone().reshape::<2, _>([batch_size, self.num_heads]);
+        let f_log = chunks[1].clone().reshape::<2, _>([batch_size, self.num_heads]);
+        let o_gate = activation::sigmoid(chunks[2].clone()).reshape::<3, _>([batch_size, self.num_heads, 1]); // [B, H, 1]
 
         // Projections
         let q = self.w_q.forward(input.clone()).reshape::<4, _>([batch_size, self.num_heads, 1, head_dim]);
         let k = self.w_k.forward(input.clone()).reshape::<4, _>([batch_size, self.num_heads, 1, head_dim]);
         let v = self.w_v.forward(input.clone()).reshape::<4, _>([batch_size, self.num_heads, head_dim, 1]);
 
-        // Corrected m_t update: max(log_f + m_{t-1}, log_i)
-        let m_t_minus_1 = max_gate_log.reshape::<4, _>([batch_size, self.num_heads, 1, 1]); // [B, H, 1, 1]
-        let i_log_m = i_log.max_dim(3); // [B, H, 1, 1] (Using max to preserve signal)
-        let f_log_val = -activation::softplus(-f_log.clone(), 1.0);
-        let f_log_m = f_log_val.max_dim(3); // [B, H, 1, 1]
+        let m_t_minus_1 = max_gate_log.reshape::<2, _>([batch_size, self.num_heads]); 
+        let i_log_m = i_log; 
+        let f_log_m = f_log; // PAPER ACCURATE: pure log-projection
         let m_t = (f_log_m.clone() + m_t_minus_1.clone()).max_pair(i_log_m.clone()); 
         
         // Stable updates for cell and normalizer
@@ -542,30 +461,36 @@ impl<B: Backend> MLstmcell<B> {
         let i_stable = (i_log_m - m_t.clone()).exp();
         
         // Updates
-        let f_exp = f_stable.clone().expand([batch_size, self.num_heads, head_dim, head_dim]); 
-        let i_exp = i_stable.clone().expand([batch_size, self.num_heads, head_dim, head_dim]);
+        let f_exp = f_stable.clone().reshape::<4, _>([batch_size, self.num_heads, 1, 1]).expand([batch_size, self.num_heads, head_dim, head_dim]); 
+        let i_exp = i_stable.clone().reshape::<4, _>([batch_size, self.num_heads, 1, 1]).expand([batch_size, self.num_heads, head_dim, head_dim]);
 
         let cell_update = v.clone().matmul(k.clone());
         let c_new = cell * f_exp + cell_update * i_exp;
         
-        let n_new = normalizer * f_stable.reshape::<3, _>([batch_size, self.num_heads, 1]).expand([batch_size, self.num_heads, head_dim]) 
-                  + k.reshape::<3, _>([batch_size, self.num_heads, head_dim]) * i_stable.reshape::<3, _>([batch_size, self.num_heads, 1]).expand([batch_size, self.num_heads, head_dim]);
+        let n_new = normalizer * f_stable.clone().reshape::<3, _>([batch_size, self.num_heads, 1]).expand([batch_size, self.num_heads, head_dim]) 
+                  + k.reshape::<3, _>([batch_size, self.num_heads, head_dim]) * i_stable.clone().reshape::<3, _>([batch_size, self.num_heads, 1]).expand([batch_size, self.num_heads, head_dim]);
 
-        let h_heads = q.matmul(c_new.clone()).squeeze::<3>(2); 
-        let n_heads = n_new.clone();
+        // --- Numerator (Eq. 9/11): h_tilde = C_t @ q_t ---
+        // c_new es [B, H, D, D], q es [B, H, 1, D]
+        // MatMul(C, q^T) -> [B, H, D, 1]
+        let h_heads = c_new.clone().matmul(q.clone().swap_dims(2, 3)).squeeze::<3>(3); // [B, H, D]
         
-        let exp_minus_m = (-m_t.clone()).exp();
-        // n_heads is 3D [B, H, D]. m_t is 3D [B, H, 1].
-        let min_divisor = exp_minus_m.expand([batch_size, self.num_heads, head_dim]);
-        let denominator = n_heads.abs().max_pair(min_divisor);
+        // Denominador escalar (Paper Eq. 13): n_t^T * q_t
+        let q_step = q.reshape::<3, _>([batch_size, self.num_heads, head_dim]);
+        let denominator = (n_new.clone() * q_step).sum_dim(2).reshape([batch_size, self.num_heads, 1]);
+        
+        // Denominador estable (max(|n^T q|, 1))
+        let ones = Tensor::ones_like(&denominator);
+        let denominator_stable = denominator.abs().max_pair(ones);
 
-        let h_normalized = h_heads / denominator;
+        let h_normalized = h_heads / denominator_stable;
         
-        // LN per head
-        let h_ln = self.ln.forward(h_normalized.reshape::<4, _>([batch_size, self.num_heads, 1, head_dim])).reshape::<2, _>([batch_size, self.hidden_size]);
+        // --- Output Gate (PAPER ACCURATE per head) ---
+        // h_gated = h_normalized * o_gate -> [B, H, D] * [B, H, 1]
+        let h_gated = h_normalized * o_gate;
         
-        let h_combined = h_ln;
-        let h_new = o * h_combined;
+        // Recombinar cabezas para la salida final: [B, H, D] -> [B, Hidden]
+        let h_new = h_gated.reshape::<2, _>([batch_size, self.hidden_size]);
 
         let new_state = MLstmstate::new(c_new, h_new.clone(), n_new, m_t.reshape::<3, _>([batch_size, self.num_heads, 1]));
         (h_new, new_state)
