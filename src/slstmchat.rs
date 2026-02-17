@@ -621,7 +621,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Comandos:");
     println!("  - Escribe un texto semilla y presiona Enter para generar");
     println!("  - Escribe 'salir' o 'exit' para terminar");
+    println!("  - Escribe 'len <n>' para cambiar la longitud (ej: len 300)");
     println!("  - Escribe 'auto' para generar con semilla automática\n");
+
+    let mut current_gen_length = 200;
 
     loop {
         print!("Semilla > ");
@@ -640,6 +643,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
 
+        if input.to_lowercase().starts_with("len ") {
+            if let Ok(new_len) = input[4..].trim().parse::<usize>() {
+                current_gen_length = new_len;
+                println!("  -> Longitud de generación cambiada a: {} tokens\n", current_gen_length);
+                continue;
+            }
+        }
+
         let seed = if input.eq_ignore_ascii_case("auto") {
             text.chars().take(20).collect::<String>()
         } else {
@@ -653,12 +664,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             &model.valid(),
             &tokenizer,
             &seed,
-            200,
+            current_gen_length,
             vocab_size,
             &device,
         );
         let gen_elapsed = gen_start.elapsed().as_secs_f32();
-        println!("└─ Longitud: 200 caracteres | Tiempo: {:.2}s\n", gen_elapsed);
+        println!("└─ Longitud: {} caracteres | Tiempo: {:.2}s\n", current_gen_length, gen_elapsed);
 
         println!("╭─────────────────────────────────────────────────────────╮");
         println!("│ TEXTO GENERADO:");
