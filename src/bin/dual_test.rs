@@ -26,7 +26,7 @@ fn main() {
     
     let head_dim = hidden_size / num_heads;
     
-    // Inicialización manual para evitar modificar src/mlstm.rs
+    // Inicialización manual para  evitar modificar src/mlstm.rs
     let initial_state = MLstmstate::new(
         Tensor::<TestBackend, 4>::zeros([batch_size, num_heads, head_dim, head_dim], &device),
         Tensor::<TestBackend, 2>::zeros([batch_size, hidden_size], &device),

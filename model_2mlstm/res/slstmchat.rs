@@ -363,7 +363,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Learning rates por bloque (igual que main.rs)
     let lr_config = LearningRateConfig::per_block_type(
         1e-4, // sLSTM learning rate
-        3e-4, // mLSTM learning rate
+        8e-4, // mLSTM learning rate
         1e-4, // Other components learning rate
     );
 
