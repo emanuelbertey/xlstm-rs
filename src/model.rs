@@ -240,12 +240,14 @@ impl<B: Backend> XLstm<B> {
     where
         <B as Backend>::FloatElem: ToPrimitive + FromPrimitive,
     {
-        // Apply input projection if present
+        // Apply input projection if present using flatten for stability
         let mut x = if let Some((linear, norm, dropout)) = &self.input_projection {
-            let mut x = linear.forward(input_seq);
-            x = norm.forward(x);
-            // No GELU here
-            dropout.forward(x)
+            let [batch_size, seq_len, _] = input_seq.dims();
+            let input_flat = input_seq.reshape([batch_size * seq_len, self.input_size]);
+            let x_flat = linear.forward(input_flat);
+            let x_3d = x_flat.reshape([batch_size, seq_len, self.hidden_size]); // DEBE SER hidden_size
+            let x_norm = norm.forward(x_3d);
+            dropout.forward(x_norm)
         } else {
             input_seq
         };
@@ -261,12 +263,14 @@ impl<B: Backend> XLstm<B> {
             hidden_states[i] = new_state;
         }
 
-        // Apply output head
+        // Apply output head using flatten for stability
+        let [batch_size, seq_len, _] = x.dims();
         let (linear1, dropout, linear2) = &self.output_head;
-        x = linear1.forward(x);
-        // No GELU here: let the LSTM features flow directly to the classifier
-        x = dropout.forward(x);
-        let output = linear2.forward(x);
+        let x_flat = x.reshape([batch_size * seq_len, self.hidden_size]);
+        let x_proj1 = linear1.forward(x_flat).reshape([batch_size, seq_len, self.hidden_size]);
+        let x_drop = dropout.forward(x_proj1);
+        let output = linear2.forward(x_drop.reshape([batch_size * seq_len, self.hidden_size]))
+            .reshape([batch_size, seq_len, self.output_size]); // DEBE SER output_size
 
         (output, hidden_states)
     }

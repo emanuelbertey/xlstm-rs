@@ -374,7 +374,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let dropout = 0.05;
 
     let seq_length = 128; 
-    let batch_size = 16; 
+    let batch_size = 10; 
     let stride = 128;     
     let num_epochs = 50;
     let num_heads = 4;
@@ -407,7 +407,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_dropout(dropout)
         .with_num_heads(num_heads)
         //.with_lstm_type(LstmType::Alternate)
-        .with_lstm_type(LstmType::SLSTM) //::SLSTM ::SLSTM<--- Forzar solo mLSTM
+        .with_lstm_type(LstmType::MLSTM) //::SLSTM ::SLSTM<--- Forzar solo mLSTM
         .with_use_projection(true);   
 
     // Verificar si existe un modelo guardado (una sola vez)
@@ -514,6 +514,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Forward pass
                 let (logits, _) = model.forward(input_batch.clone(), None);
+                
+                // Debug de dimensiones solicitado por el usuario
+                if batch_idx == 0 && epoch == 0 {
+                    println!("\n[DEBUG] input_batch shape: {:?}", input_batch.dims());
+                    println!("[DEBUG] logits shape: {:?}\n", logits.dims());
+                }
 
                 // --- OPTIMIZACIÓN: COSTE Y ACCURACY NATIVOS SOBRE TODA LA SECUENCIA ---
                 
@@ -521,12 +527,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let logits_flat = logits.reshape::<2, _>([current_batch_size * seq_length, vocab_size]);
                 let target_flat = target_batch.reshape::<1, _>([current_batch_size * seq_length]);
 
-                // Usar inner backend para los targets para que no consuman memoria de gradientes
-                let eye_inner = Tensor::<Wgpu<f32, i32>, 2>::eye(vocab_size, &device);
-                let target_one_hot = Tensor::<MyBackend, 2>::from_inner(
-                    eye_inner.select(0, target_flat.clone().inner())
-                             .reshape([current_batch_size * seq_length, vocab_size])
-                );
+                // ONE-HOT NATIVO (SIN MEZCLAR BACKENDS)
+                let target_one_hot = target_flat.clone().one_hot::<2>(vocab_size).float();
 
                 // 2. Calcular Cross-Entropy nativo sobre toda la secuencia
                 let log_probs = (softmax(logits_flat.clone(), 1) + 1e-10).log();

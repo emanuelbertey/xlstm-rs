@@ -172,15 +172,18 @@ impl<B: Backend> XLstmblock<B> {
             };
 
         // Apply normalization BEFORE activation for stability (critical for mLSTM)
-        let output: Tensor<B, 3> = self.norm.forward(lstm_output);
+        let [batch_size, seq_len, hidden_size] = lstm_output.dims();
+        let [_, _, input_size] = input_seq.dims();
+        let output = self.norm.forward(lstm_output);
         // Apply activation
-        let output: Tensor<B, 3> = activation::gelu(output);
-        // Apply projection
-        let output: Tensor<B, 3> = self.proj.forward(output);
+        let output = activation::gelu(output);
+        // Apply projection with flatten/reshape for autodiff stability
+        let output = self.proj.forward(output.reshape([batch_size * seq_len, hidden_size]))
+            .reshape([batch_size, seq_len, input_size]);
         // Apply dropout
-        let output: Tensor<B, 3> = self.dropout.forward(output);
+        let output = self.dropout.forward(output);
         // Residual connection
-        let output: Tensor<B, 3> = output + input_seq;
+        let output = output + input_seq;
 
         (output, new_state)
     }

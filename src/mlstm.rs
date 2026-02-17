@@ -270,14 +270,16 @@ impl<B: Backend> MLstmcell<B> {
         let head_dim = self.hidden_size / self.num_heads;
         let device = input_seq.device();
 
-        // 1. Parallel Projections (Q, K, V)
-        let q = self.w_q.forward(input_seq.clone())
+        // 1. Parallel Projections (Q, K, V) con flatten para estabilidad de gradientes
+        let input_flat = input_seq.clone().reshape::<2, _>([batch_size * seq_len, self.input_size]);
+        
+        let q = self.w_q.forward(input_flat.clone())
             .reshape::<4, _>([batch_size, seq_len, self.num_heads, head_dim])
             .swap_dims(1, 2); // [B, H, S, D_h]
-        let k = self.w_k.forward(input_seq.clone())
+        let k = self.w_k.forward(input_flat.clone())
             .reshape::<4, _>([batch_size, seq_len, self.num_heads, head_dim])
             .swap_dims(1, 2);
-        let v = self.w_v.forward(input_seq.clone())
+        let v = self.w_v.forward(input_flat)
             .reshape::<4, _>([batch_size, seq_len, self.num_heads, head_dim])
             .swap_dims(1, 2);
 
@@ -288,8 +290,11 @@ impl<B: Backend> MLstmcell<B> {
         let bias_val = self.bias.val();
 
         // Proyección directa a num_heads
-        let gates = input_seq.clone().matmul(weight_ih_val.reshape::<3, _>([1, self.input_size, 3 * self.num_heads])) 
-                    + bias_val.reshape::<3, _>([1, 1, 3 * self.num_heads]);
+        let gates = input_seq.clone()
+            .reshape::<2, _>([batch_size * seq_len, self.input_size])
+            .matmul(weight_ih_val)
+            .reshape::<3, _>([batch_size, seq_len, 3 * self.num_heads])
+            + bias_val.reshape::<3, _>([1, 1, 3 * self.num_heads]);
         
         let i_log = gates.clone().slice([0..batch_size, 0..seq_len, 0..self.num_heads]).swap_dims(1, 2).reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]); // [B, H, S, 1]
         let f_log = gates.clone().slice([0..batch_size, 0..seq_len, self.num_heads..2*self.num_heads]).swap_dims(1, 2).reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]);
@@ -365,11 +370,9 @@ impl<B: Backend> MLstmcell<B> {
         let qk = q.clone().matmul(k.clone().swap_dims(2, 3)); // [B, H, S, S]
         */
         // 1. Producto punto q * k_k^T con escalado de estabilidad
-        let head_dim_f = head_dim as f32;
-        let scale = 1.0 / head_dim_f.sqrt(); 
+        let scale = 1.0 / (head_dim as f32).sqrt(); 
 
-        let qk = q.clone().matmul(k.clone().swap_dims(2, 3)) * scale;///
-
+        let qk = q.clone().matmul(k.clone().swap_dims(2, 3)) * scale;
         // 2. Aplicamos los pesos de decaimiento escalares a las puntuaciones de atención
         // baseline let attention_scores = weights.clone() * qk.clone(); // [B, H, S, S]
         let attention_scores = weights.clone() * qk; // [B, H, S, S]
@@ -382,7 +385,6 @@ impl<B: Backend> MLstmcell<B> {
         // h_0 = weights_initial * (C_0 @ q_t)
         // q es [B, H, S, D], Cell es [B, H, D, D].
         // Matmul(q, Cell.transpose) -> [B, H, S, D]
-       // baseline  let h_initial = q.clone().matmul(state.cell.clone().swap_dims(2, 3)) * initial_scale.clone();
         let h_initial = (q.clone() * scale).matmul(state.cell.clone().swap_dims(2, 3)) * initial_scale.clone();
         // --- Denominator (n_t^T @ q_t) ---
         // n_parallel = sum_k weights[t, k] * k_k
@@ -501,10 +503,11 @@ impl<B: Backend> MLstmcell<B> {
 
         // Numerador: h_tilde = C_t @ q_t
         // q_step es [B, H, 1, D], c_new es [B, H, D, D]
-        let h_heads = q.clone().matmul(c_new.clone().swap_dims(2, 3)).squeeze::<3>(2); // [B, H, D]
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let h_heads = (q.clone() * scale).matmul(c_new.clone().swap_dims(2, 3)).reshape([batch_size, self.num_heads, head_dim]); // [B, H, D]
         
         // Denominador escalar (Paper Eq. 13): n_t^T * q_t
-        let q_step = q.reshape::<3, _>([batch_size, self.num_heads, head_dim]);
+        let q_step = q.reshape([batch_size, self.num_heads, head_dim]) * scale;
         let denominator = (n_new.clone() * q_step).sum_dim(2).reshape([batch_size, self.num_heads, 1]);
         
         // Denominador estable (max(|n^T q|, 1))
@@ -518,7 +521,7 @@ impl<B: Backend> MLstmcell<B> {
         let h_gated = h_normalized * o_gate;
         
         // Recombinar cabezas para la salida final: [B, H, D] -> [B, Hidden]
-        let h_new = h_gated.reshape::<2, _>([batch_size, self.hidden_size]);
+        let h_new = h_gated.reshape([batch_size, self.hidden_size]);
 
         let new_state = MLstmstate::new(c_new, h_new.clone(), n_new, m_t.reshape::<3, _>([batch_size, self.num_heads, 1]));
         (h_new, new_state)
