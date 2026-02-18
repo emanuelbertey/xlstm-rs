@@ -45,7 +45,7 @@ pub struct XLstmblockConfig {
     /// Block type (sLSTM or mLSTM)
     pub block_type: BlockType,
     /// Weight initializer
-    #[config(default = "Initializer::XavierNormal{gain:0.1}")]
+    #[config(default = "Initializer::XavierNormal{gain:0.0}")]
     pub initializer: Initializer,
 }
 
@@ -153,7 +153,8 @@ impl<B: Backend> XLstmblock<B> {
         let (lstm_output, new_state): (Tensor<B, 3>, Option<LSTMState<B>>) =
             match (&self.lstm, state) {
                 (LSTMVariant::SLSTM(lstm), Some(LSTMState::SLSTM(s))) => {
-                    let (out, state) = lstm.forward(&input_seq, Some(s));
+                    let (out, state): (Tensor<B, 3>, Vec<SLstmstate<B, 2>>) =
+                        lstm.forward(&input_seq, Some(s)); // No clone here
                     (out, Some(LSTMState::SLSTM(state)))
                 }
                 (LSTMVariant::SLSTM(lstm), _) => {
@@ -170,11 +171,16 @@ impl<B: Backend> XLstmblock<B> {
                 }
             };
 
-        let output = self.norm.forward(lstm_output);
-        let output = activation::gelu(output);
-        let output = self.proj.forward(output);
-        let output = self.dropout.forward(output);
-        let output = output + input_seq;
+        // Apply normalization BEFORE activation for stability (critical for mLSTM)
+        let output: Tensor<B, 3> = self.norm.forward(lstm_output);
+        // Apply activation
+        let output: Tensor<B, 3> = activation::gelu(output);
+        // Apply projection
+        let output: Tensor<B, 3> = self.proj.forward(output);
+        // Apply dropout
+        let output: Tensor<B, 3> = self.dropout.forward(output);
+        // Residual connection
+        let output: Tensor<B, 3> = output + input_seq;
 
         (output, new_state)
     }
