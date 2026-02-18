@@ -143,8 +143,12 @@ fn create_batch<B: AutodiffBackend>(
     for i in 0..batch_size {
         let current_start = start_idx + i;
         for j in 0..seq_length {
-            x_indices.push(tokens[current_start + j] as i64);
-            y_indices.push(tokens[current_start + j + 1] as i64);
+            // PADDING: Si nos salimos del texto, rellenamos con 0
+            let x_idx = if current_start + j < tokens.len() { tokens[current_start + j] } else { 0 };
+            let y_idx = if current_start + j + 1 < tokens.len() { tokens[current_start + j + 1] } else { 0 };
+            
+            x_indices.push(x_idx as i64);
+            y_indices.push(y_idx as i64);
         }
     }
 
@@ -362,9 +366,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_heads = 4;
     // Learning rates por bloque (igual que main.rs)
     let lr_config = LearningRateConfig::per_block_type(
-        1e-4, // sLSTM learning rate
-        3e-4, // mLSTM learning rate
-        1e-4, // Other components learning rate
+        1e-3, // sLSTM learning rate (unused here)
+        8e-4, // mLSTM learning rate
+        1e_3,
+        1e-3, // Other components learning rate
     );
 
     println!("Configuración del modelo:");
@@ -388,8 +393,8 @@ fn main() -> Result<(), Box<dyn Error>> {
      let config = XLstmconfig::new(vocab_size, hidden_size, num_layers, num_blocks, output_size)
         .with_dropout(dropout)
         .with_num_heads(num_heads)
-        //.with_lstm_type(LstmType::Alternate)
-        .with_lstm_type(LstmType::MLSTM) //::SLSTM ::SLSTM<--- Forzar solo mLSTM
+        .with_lstm_type(LstmType::MLSTM) 
+        .with_initializer(burn::nn::Initializer::XavierNormal { gain: 1.0 })
         .with_use_projection(true);   
 
     // Verificar si existe un modelo guardado (una sola vez)
@@ -477,7 +482,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut num_losses = 0;
             let mut correct = 0;
             let mut total = 0;
-
+            let mut current_state = None; 
             for batch_idx in 0..num_batches {
                 let current_batch_start_seq = batch_idx * batch_size;
                 let current_batch_size = (batch_size).min(num_actual_sequences - current_batch_start_seq);
@@ -486,24 +491,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                     break;
                 }
 
-                // Generar batch instantáneo (usando Inner Backend para ahorrar RAM)
+                // Generar batch instantáneo (usando siempre batch_size completo para evitar panics)
                 let (input_batch, target_batch) = create_batch::<MyBackend>(
                     &tokens,
                     current_batch_start_seq * stride,
-                    current_batch_size,
+                    batch_size, // Forzar bache completo (create_batch se encarga del padding)
                     seq_length,
                     vocab_size,
                     &device,
                 );
 
                 // Forward pass
-                let (logits, _) = model.forward(input_batch.clone(), None);
-
+               // let (logits, _) = model.forward(input_batch.clone(), None);
+                // Forward pass
+                //let (logits, lout) = model.forward(input_batch.clone(), current_state.clone());
+                // use out pero es caro 
+               
+               if batch_idx == 0 {
+                // Hacemos un forward silencioso para llenar las matrices del mLSTM
+                let (_, warm_state) = model.predict_last(input_batch.clone(), None);
+                current_state = Some(warm_state);
+                println!("> Estado inicializado con éxito en el Batch 0");
+            }
+                let (logits, next_state) = model.forward(input_batch.clone(), current_state);
+                current_state = Some(next_state.clone());
                 // --- OPTIMIZACIÓN: COSTE Y ACCURACY NATIVOS ---
                 
                 // Aplanar para cálculo eficiente
-                let logits_flat: Tensor<MyBackend, 2> = logits.reshape([current_batch_size * seq_length, vocab_size]);
-                let target_flat = target_batch.reshape::<1, _>([current_batch_size * seq_length]);
+                let logits_flat: Tensor<MyBackend, 2> = logits.reshape([batch_size * seq_length, vocab_size]);
+                let target_flat = target_batch.reshape::<1, _>([batch_size * seq_length]);
 
                 // Usar CrossEntropyLoss nativo de Burn (evita one-hot y es más estable)
                 let loss_tensor = loss_fn.forward(logits_flat.clone(), target_flat.clone());
@@ -513,12 +529,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 num_losses += 1;
 
                 // 3. Calcular Accuracy nativo sobre toda la secuencia
-                let predicted_indices = logits_flat.argmax(1).reshape([current_batch_size * seq_length]);
+                let predicted_indices = logits_flat.argmax(1).reshape([batch_size * seq_length]);
                 let matches = predicted_indices.equal(target_flat);
                 let correct_batch = matches.int().sum().into_data().as_slice::<i64>().unwrap()[0];
                 
                 correct += correct_batch as usize;
-                total += current_batch_size * seq_length;
+                total += batch_size * seq_length;
 
                 // --- FIN OPTIMIZACIÓN ---
 

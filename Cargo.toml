@@ -45,6 +45,24 @@ path = "src/slstmchat.rs"
 name = "xlstmchat"
 path = "src/xlstmchat.rs"
 
+
+[[bin]]
+name = "mingruchat"
+path = "src/mingruchat.rs"
+
+[[bin]]
+name = "test_slstm"
+path = "src/bin/test_slstm.rs"
+
+[[bin]]
+name = "dual_test"
+path = "src/bin/dual_test.rs"
+
+
+[[bin]]
+name = "pro_trainer"
+path = "src/pro_trainer.rs"
+
 [profile.release]
 #opt-level = 3
 #lto = "fat"

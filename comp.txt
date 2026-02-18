@@ -10,6 +10,9 @@ $env:RUST_BACKTRACE=1; cargo run --release --bin xlstmchat -- input.txt
 
 $env:RUST_BACKTRACE=1; cargo run --release --bin slstmchat -- input.txt
 
+$env:RUST_BACKTRACE=1; cargo run --release --bin mingruchat -- input.txt
+
+$env:RUST_BACKTRACE=1; cargo run --release --bin pro_trainer -- ./data
 
 cargo run --release --bin mlstmchat -- input.txt
 
@@ -17,4 +20,13 @@ cargo test test_mlstm_dual_equivalence -- --nocapture
 
 cargo test test_mlstm_dual_equivalence -- --nocapture
 cargo run --bin dual_test
+cargo run --bin test_slstm
+cargo run --bin test_slstm -- stability
+cargo run --bin test_slstm -- monotonic
+cargo run --bin test_slstm -- compare_lstm
+cargo run --bin test_slstm -- grad
+cargo run --release --bin test_slstm -- copy_count
+cargo run --release --bin test_slstm
+cargo run --release --bin dual_test
+cargo run --release --bin test_mingru
 

@@ -209,9 +209,9 @@ impl<B: Backend> MLstmcell<B> {
     ) -> Self {
         let mut bias_data = alloc::vec![0.0; 3 * num_heads];
         for i in 0..num_heads {
-            bias_data[i] = 0.0;             // Input gate: Neutral (exp(0) = 1)
-            bias_data[i + num_heads] = -1.0; // Forget gate: Moderate decay initial
-            bias_data[i + 2 * num_heads] = 0.0; // Output gate
+            bias_data[i] = -2.0;             // Input gate: Prevent normalizer explosion
+            bias_data[i + num_heads] = 0.0;  // Forget gate: Neutral (exp(0) = 1)
+            bias_data[i + 2 * num_heads] = 1.0; // Output gate: Mostly open
         }
         let bias = Tensor::from_floats(bias_data.as_slice(), device);
 
@@ -366,7 +366,7 @@ impl<B: Backend> MLstmcell<B> {
         let head_dim_f = head_dim as f32;
         let scale = 1.0 / head_dim_f.sqrt(); 
 
-        let qk = q.clone().matmul(k.clone().swap_dims(2, 3)) * scale;///
+        let qk = q.clone().matmul(k.clone().swap_dims(2, 3)) * scale; // Standard attention scores
 
         // 2. Aplicamos los pesos de decaimiento escalares a las puntuaciones de atención
         // baseline let attention_scores = weights.clone() * qk.clone(); // [B, H, S, S]
@@ -427,14 +427,27 @@ impl<B: Backend> MLstmcell<B> {
         
         // 2. n_T = exp(F_T - m_T) * n_0 + sum_k (weights[T, k] * k_k)
         let last_scale = initial_scale.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..1]).reshape::<3, _>([batch_size, self.num_heads, 1]);
-        let n_initial_contrib = state.normalizer * last_scale.clone().expand([batch_size, self.num_heads, head_dim]);
+        
+        // Ajuste de normalizador inicial si el batch cambió
+        let s_norm = if state.normalizer.dims()[0] != batch_size {
+            state.normalizer.clone().slice([0..batch_size, 0..self.num_heads, 0..head_dim])
+        } else {
+            state.normalizer.clone()
+        };
+        let n_initial_contrib = s_norm * last_scale.clone().reshape::<3, _>([batch_size, self.num_heads, 1]);
         
         let last_weights = weights.slice([0..batch_size, 0..self.num_heads, last_idx..seq_len, 0..seq_len]); 
         let n_parallel_contrib = last_weights.clone().matmul(k.clone()).reshape::<3, _>([batch_size, self.num_heads, head_dim]);
         let final_norm = n_initial_contrib + n_parallel_contrib;
 
         // 3. C_T = exp(F_T - m_T) * C_0 + sum_k (weights[T, k] * v_k @ k_k^T)
-        let c_initial_contrib = state.cell * last_scale.clone().reshape::<4, _>([batch_size, self.num_heads, 1, 1]);
+        // Ajuste de celda inicial si el batch cambió
+        let s_cell = if state.cell.dims()[0] != batch_size {
+            state.cell.clone().slice([0..batch_size, 0..self.num_heads, 0..head_dim, 0..head_dim])
+        } else {
+            state.cell.clone()
+        };
+        let c_initial_contrib = s_cell * last_scale.clone().reshape::<4, _>([batch_size, self.num_heads, 1, 1]);
         
         // sum_k weights[T, k] * (v_k @ k_k^T) --> (v_weighted^T @ k)
         let v_weighted = v * last_weights.reshape::<4, _>([batch_size, self.num_heads, seq_len, 1]);

@@ -10,7 +10,7 @@ use burn::{
     config::Config,
     module::{Module, Param},
     nn::{Dropout, DropoutConfig, Initializer},
-    tensor::{activation, backend::Backend, Distribution, Tensor},
+    tensor::{activation, backend::Backend, Tensor},
 };
 
 /// State for sLSTM containing cell, normalizer, hidden, and stabilizer states
@@ -55,9 +55,9 @@ pub struct SLstmconfig {
     pub num_layers: usize,
     #[config(default = "0.0")]
     pub dropout: f64,
-    #[config(default = "0.02")]
+    #[config(default = "0.1")]
     pub weight_stdev: f64,
-    #[config(default = "1.0")] // Forget gate biased to 1.0 (log-space)
+    #[config(default = "0.0")] // Forget gate neutral (log(1.0)=0)
     pub forget_bias: f32,
     #[config(default = "0.0")]
     pub input_bias: f32,
@@ -67,7 +67,7 @@ pub struct SLstmconfig {
     pub exp_clamp_min: f32,
     #[config(default = "30.0")]
     pub exp_clamp_max: f32,
-    #[config(default = "-10.0")]
+    #[config(default = "0.0")]
     pub stabilizer_init: f32,
     #[config(default = "Initializer::XavierNormal{gain: 1.0}")]
     pub initializer: Initializer,
@@ -175,10 +175,18 @@ pub struct SLstmcell<B: Backend> {
 
 impl<B: Backend> SLstmcell<B> {
     pub fn new(input_size: usize, hidden_size: usize, config: &SLstmconfig, device: &B::Device) -> Self {
-        let dist = Distribution::Normal(0.0, config.weight_stdev);
-        
-        let weight_ih = Tensor::random([4 * hidden_size, input_size], dist, device);
-        let weight_hh = Tensor::random([4 * hidden_size, hidden_size], dist, device);
+        let weight_ih = config.initializer.init_with(
+            [4 * hidden_size, input_size],
+            Some(input_size),
+            Some(4 * hidden_size),
+            device,
+        );
+        let weight_hh = config.initializer.init_with(
+            [4 * hidden_size, hidden_size],
+            Some(hidden_size),
+            Some(4 * hidden_size),
+            device,
+        );
 
         // Biased initialization for Forget and Input gates
         let mut bias_data = alloc::vec![0.0f32; 4 * hidden_size];
@@ -189,8 +197,8 @@ impl<B: Backend> SLstmcell<B> {
         let bias = Tensor::from_floats(bias_data.as_slice(), device);
 
         Self {
-            weight_ih: Param::from_tensor(weight_ih),
-            weight_hh: Param::from_tensor(weight_hh),
+            weight_ih,
+            weight_hh,
             bias: Param::from_tensor(bias),
             hidden_size,
             epsilon: config.epsilon,
@@ -215,20 +223,22 @@ impl<B: Backend> SLstmcell<B> {
         let z = chunks[2].clone().tanh();
         let o = activation::sigmoid(chunks[3].clone());
 
-        // Log-space stabilization
+        // Log-space stabilization: m_t = max(f_log + m_{t-1}, i_log)
         let m_prev_plus_f = f_log + max_gate_log;
         let m_new = m_prev_plus_f.clone().max_pair(i_log.clone());
 
         // Stabilized exponentials
-        let i_exp = (i_log - m_new.clone()).clamp(self.exp_clamp_min, self.exp_clamp_max).exp();
-        let f_exp = (m_prev_plus_f - m_new.clone()).clamp(self.exp_clamp_min, self.exp_clamp_max).exp();
+        let i_exp = (i_log - m_new.clone()).exp();
+        let f_exp = (m_prev_plus_f - m_new.clone()).exp();
 
         // Updates
         let c_new = f_exp.clone() * cell + i_exp.clone() * z;
         let n_new = f_exp * normalizer + i_exp;
 
-        // Output normalization
-        let n_stable = n_new.clone().abs().add_scalar(self.epsilon);
+        // Output normalization (Robust to small n_new)
+        // Usamos max_pair con epsilon para evitar que n_new=0 rompa el gradiente,
+        // pero sin el sesgo aditivo que se amplifica en el espacio logarítmico.
+        let n_stable = n_new.clone().max_pair(n_new.full_like(self.epsilon));
         let h_new = o * (c_new.clone() / n_stable);
 
         (h_new.clone(), SLstmstate::new(c_new, h_new, n_new, m_new))

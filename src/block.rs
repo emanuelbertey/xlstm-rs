@@ -16,7 +16,7 @@ use burn::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{MLstm, MLstmconfig, MLstmstate, SLstm, SLstmconfig, SLstmstate};
+use crate::{MLstm, MLstmconfig, MLstmstate, SLstm, SLstmconfig, SLstmstate, MinGru, MinGruConfig, MinGruState};
 
 /// Type of LSTM block
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +25,8 @@ pub enum BlockType {
     SLSTM,
     /// Matrix LSTM
     MLSTM,
+    /// Minimal GRU
+    MINGRU,
 }
 
 /// Configuration for xLSTM block
@@ -82,6 +84,20 @@ impl XLstmblockConfig {
                     proj: LinearConfig::new(self.hidden_size, self.input_size).init(device),
                 }
             }
+            BlockType::MINGRU => {
+                let gru: MinGru<B> =
+                    MinGruConfig::new(self.input_size, self.hidden_size, self.num_layers)
+                        .with_dropout(self.dropout)
+                        .with_initializer(self.initializer.clone())
+                        .init(device);
+
+                XLstmblock {
+                    lstm: LSTMVariant::MINGRU(gru),
+                    norm: LayerNormConfig::new(self.hidden_size).init(device),
+                    dropout: DropoutConfig::new(self.dropout).init(),
+                    proj: LinearConfig::new(self.hidden_size, self.input_size).init(device),
+                }
+            }
         }
     }
 }
@@ -93,6 +109,8 @@ pub enum LSTMVariant<B: Backend> {
     SLSTM(SLstm<B>),
     /// Matrix LSTM variant
     MLSTM(MLstm<B>),
+    /// Minimal GRU variant
+    MINGRU(MinGru<B>),
 }
 
 /// Enum for holding either sLSTM or mLSTM states
@@ -102,6 +120,8 @@ pub enum LSTMState<B: Backend> {
     SLSTM(alloc::vec::Vec<SLstmstate<B, 2>>),
     /// States for mLSTM
     MLSTM(alloc::vec::Vec<MLstmstate<B>>),
+    /// States for minGRU
+    MINGRU(alloc::vec::Vec<MinGruState<B>>),
 }
 
 impl<B: Backend> LSTMState<B> {
@@ -113,6 +133,9 @@ impl<B: Backend> LSTMState<B> {
             }
             LSTMState::MLSTM(states) => {
                 LSTMState::MLSTM(states.into_iter().map(|s| s.detach()).collect())
+            }
+            LSTMState::MINGRU(states) => {
+                LSTMState::MINGRU(states.into_iter().map(|s| s.detach()).collect())
             }
         }
     }
@@ -169,6 +192,14 @@ impl<B: Backend> XLstmblock<B> {
                     let (out, state) = lstm.forward(&input_seq, None);
                     (out, Some(LSTMState::MLSTM(state)))
                 }
+                (LSTMVariant::MINGRU(gru), Some(LSTMState::MINGRU(s))) => {
+                    let (out, state) = gru.forward(input_seq.clone(), Some(s));
+                    (out, Some(LSTMState::MINGRU(state)))
+                }
+                (LSTMVariant::MINGRU(gru), _) => {
+                    let (out, state) = gru.forward(input_seq.clone(), None);
+                    (out, Some(LSTMState::MINGRU(state)))
+                }
             };
 
         // Apply normalization BEFORE activation for stability (critical for mLSTM)
@@ -190,6 +221,7 @@ impl<B: Backend> XLstmblock<B> {
         match &self.lstm {
             LSTMVariant::SLSTM(_) => BlockType::SLSTM,
             LSTMVariant::MLSTM(_) => BlockType::MLSTM,
+            LSTMVariant::MINGRU(_) => BlockType::MINGRU,
         }
     }
 }

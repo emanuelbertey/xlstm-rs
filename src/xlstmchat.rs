@@ -301,7 +301,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let text_file = &args[1];
     let tokenizer_path = "tokenizer.json";
-    let model_path = "xlstm_chat_model_xlstm";
+    let model_path = "slstm_model";
 
     // Intentar leer vocab_size de argumentos o usar 2000 por defecto
     let target_vocab_size = 1024;
@@ -341,7 +341,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_heads = 4;
     // Learning rates por bloque (igual que main.rs)
     let lr_config = LearningRateConfig::per_block_type(
-        1e-4, // sLSTM learning rate
+        1e-3, // sLSTM learning rate
         8e-4, // mLSTM learning rate
         1e-4, // Other components learning rate
     );
@@ -367,7 +367,7 @@ fn main() -> Result<(), Box<dyn Error>> {
      let config = XLstmconfig::new(vocab_size, hidden_size, num_layers, num_blocks, output_size)
         .with_dropout(dropout)
         .with_num_heads(num_heads)
-        .with_lstm_type(LstmType::MLSTM)
+        .with_lstm_type(LstmType::SLSTM)
         //.with_lstm_type(LstmType::MLSTM) //::SLSTM ::SLSTM<--- Forzar solo mLSTM
         .with_use_projection(true);   
 

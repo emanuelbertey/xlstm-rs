@@ -31,6 +31,8 @@ pub enum LstmType {
     SLSTM,
     /// All blocks use mLSTM
     MLSTM,
+    /// All blocks use minGRU
+    MINGRU,
     /// Alternating pattern: sLSTM, mLSTM, sLSTM, mLSTM, ...
     Alternate,
     /// Custom pattern specified by user
@@ -46,6 +48,7 @@ pub enum LearningRateConfig {
     PerBlockType {
         slstm_lr: f64,
         mlstm_lr: f64,
+        mingru_lr: f64,
         other_lr: f64, // For input projection and output head
     },
     /// Explicit learning rate per block (length must match num_blocks)
@@ -63,10 +66,11 @@ impl LearningRateConfig {
     }
 
     /// Create per-block-type learning rate configuration
-    pub fn per_block_type(slstm_lr: f64, mlstm_lr: f64, other_lr: f64) -> Self {
+    pub fn per_block_type(slstm_lr: f64, mlstm_lr: f64, mingru_lr: f64, other_lr: f64) -> Self {
         Self::PerBlockType {
             slstm_lr,
             mlstm_lr,
+            mingru_lr,
             other_lr,
         }
     }
@@ -109,7 +113,7 @@ pub struct XLstmconfig {
     #[config(default = "true")]
     pub use_projection: bool,
     /// Weight initializer
-    #[config(default = "Initializer::XavierNormal{gain:0.1}")]
+    #[config(default = "Initializer::XavierNormal{gain:1.0}")]
     pub initializer: Initializer,
 }
 
@@ -172,6 +176,7 @@ impl XLstmconfig {
         match &self.lstm_type {
             LstmType::SLSTM => alloc::vec![BlockType::SLSTM; self.num_blocks],
             LstmType::MLSTM => alloc::vec![BlockType::MLSTM; self.num_blocks],
+            LstmType::MINGRU => alloc::vec![BlockType::MINGRU; self.num_blocks],
             LstmType::Alternate => (0..self.num_blocks)
                 .map(|i| {
                     if i % 2 == 0 {
@@ -324,6 +329,7 @@ impl<B: Backend> XLstm<B> {
             let type_str = match block.get_type() {
                 BlockType::SLSTM => "sLSTM",
                 BlockType::MLSTM => "mLSTM",
+                BlockType::MINGRU => "minGRU",
             };
             println!("    Block {}: {}", i + 1, type_str);
         }
@@ -382,6 +388,7 @@ impl<B: AutodiffBackend> XLstm<B> {
             LearningRateConfig::PerBlockType {
                 slstm_lr,
                 mlstm_lr,
+                mingru_lr,
                 other_lr,
             } => {
                 // Collect block types before we start moving model
@@ -393,6 +400,7 @@ impl<B: AutodiffBackend> XLstm<B> {
                         let lr = match block.get_type() {
                             BlockType::SLSTM => *slstm_lr,
                             BlockType::MLSTM => *mlstm_lr,
+                            BlockType::MINGRU => *mingru_lr,
                         };
                         (i, block.get_type(), lr)
                     })
