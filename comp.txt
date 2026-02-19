@@ -30,3 +30,4 @@ cargo run --release --bin test_slstm
 cargo run --release --bin dual_test
 cargo run --release --bin test_mingru
 
+$env:RUSTFLAGS="-C target-cpu=native"; cargo run --release --bin mingruchat -- input.txt

@@ -21,6 +21,7 @@ use burn::{
     tensor::{activation::softmax, Tensor, backend::{AutodiffBackend, Backend}},
     nn::loss::CrossEntropyLossConfig,
 };
+use burn::grad_clipping::GradientClippingConfig;
 use burn::tensor::TensorData;
 use burn_autodiff::Autodiff;
 //use burn_wgpu::{Wgpu, WgpuDevice};
@@ -367,7 +368,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Learning rates por bloque (igual que main.rs)
     let lr_config = LearningRateConfig::per_block_type(
         1e-3, // sLSTM learning rate (unused here)
-        8e-4, // mLSTM learning rate
+        4e-4, // mLSTM learning rate
         1e_3,
         1e-3, // Other components learning rate
     );
@@ -460,14 +461,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         model.print_architecture();
         println!();
 
-        // Crear optimizador
+         // Crear optimizador
         let mut optim = AdamConfig::new()
             .with_beta_1(0.9)
             .with_beta_2(0.999)
             .with_epsilon(1e-8)
             .with_weight_decay(Some(WeightDecayConfig::new(1e-4)))
-           // .with_grad_clipping(Some(burn::optim::grad_clipping::GradientClippingConfig::Norm(1.0)))//
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(5.0)))
             .init();
+
 
         println!("Iniciando entrenamiento...\n");
 

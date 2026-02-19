@@ -6,13 +6,14 @@ description = "xLSTM: Extended Long Short-Term Memory implementation in Rust usi
 
 
 [dependencies]
-burn = { version = "0.18.0", features = ["train", "std", "fusion"] }
+burn = { version = "0.18.0", features = ["train", "std"] }
+#burn = { version = "0.18.0", features = ["train", "std", "fusion"] }
 #burn = { version = "0.18.0", features = ["train", "std", "fusion"] }
 burn-autodiff = "0.18.0"
-burn-fusion = "0.18.0"
+#burn-fusion = "0.18.0"
 burn-ndarray =  "0.18.0"
-burn-wgpu = { version = "0.18.0", features = ["vulkan", "cubecl-spirv", "fusion"] }
-chrono = "0.4.42"
+#burn-wgpu = { version = "0.18.0", features = ["vulkan", "cubecl-spirv", "fusion"] }
+#chrono = "0.4.42"
 csv = "1.3.1"
 env_logger = "0.11.8"
 log = "0.4.28"

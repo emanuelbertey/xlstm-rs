@@ -366,7 +366,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let lr_config = LearningRateConfig::per_block_type(
         1e-4, // sLSTM learning rate
         1e-4, // mLSTM learning rate
-        3e-3, // minGRU learning rate
+        1e-3, // minGRU learning rate
         1e-4, // Other components learning rate
     );
 
@@ -593,6 +593,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .create(true)
                         .append(true)
                         .open(log_path)?;
+                    
+                    writeln!(file, "====================================================")?;
+                    writeln!(file, "Config: {:?}", config)?;
+                    writeln!(file, "Config: vocab_size={}, hidden_size={}, num_layers={}, num_blocks={}, output_size={}, dropout={}, seq_length={}, batch_size={}, stride={}, num_epochs={}, num_heads={}
+                    ====================================================
+                    Learning rates: sLSTM={}, mLSTM={}, minGRU={}, other={}
+                    ====================================================", 
+                    vocab_size, hidden_size, num_layers, num_blocks, output_size, dropout, 
+                    seq_length, batch_size, stride, num_epochs, num_heads,
+                    lr_config.slstm, lr_config.mlstm, lr_config.min_gru, lr_config.other)?;
+
                     
                     writeln!(file, "====================================================")?;
                     writeln!(file, "ÉPOCA: {} | LOSS: {:.4} | ACC: {:.2}%", epoch + 1, avg_loss, accuracy)?;
