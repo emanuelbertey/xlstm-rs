@@ -1,4 +1,6 @@
 $env:RUSTFLAGS="-C target-cpu=native"
+chmod +x pro_trainer
+./pro_trainer
 
 cargo build --release --bin mainchat
 
