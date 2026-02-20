@@ -171,66 +171,86 @@ fn run_grad_input() {
     println!("Gradiente REAL medio |d last / d x|: {:.6}", grad_val);
 }
 
+use burn::module::Module;
+
+#[derive(Module, Debug)]
+struct CopyTestModel<B: Backend> {
+    slstm: SLstm<B>,
+    linear: burn::nn::Linear<B>,
+}
+
+impl<B: Backend> CopyTestModel<B> {
+    fn new(input_size: usize, hidden_size: usize, device: &B::Device) -> Self {
+        let config = SLstmconfig::new(input_size, hidden_size, 1)
+            .with_dropout(0.0)
+            .with_forget_bias(0.0);
+        let slstm = config.init(device);
+        let linear = burn::nn::LinearConfig::new(hidden_size, 2).init(device);
+        Self { slstm, linear }
+    }
+
+    fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 2> {
+        let [batch_size, seq_len, _] = x.dims();
+        let (h_seq, _) = self.slstm.forward(&x, None);
+        let h_last = h_seq.slice([0..batch_size, seq_len - 1..seq_len, 0..self.slstm.d_hidden])
+            .reshape([batch_size, self.slstm.d_hidden]);
+        self.linear.forward(h_last)
+    }
+}
+
 fn run_copy_count() {
+    use burn::optim::{AdamConfig, Optimizer};
+    use burn::module::AutodiffModule;
+
+    type AtDiffBackend = burn::backend::Autodiff<TestBackend>;
+
     let device = Default::default();
     let batch_size = 64;
     let seq_len = 12;
     let input_size = 1;
     let hidden_size = 16;
-    let mut rng = rand::thread_rng(); // Usamos thread_rng compatible
+    let mut rng = rand::rng(); 
     let mut xs: Vec<f32> = Vec::with_capacity(batch_size * seq_len);
     let mut ys: Vec<i64> = Vec::with_capacity(batch_size);
     for _ in 0..batch_size {
-        let mut sum = 0i64;
-        for _ in 0..seq_len {
+        let mut first_bit = 0i64;
+        for t in 0..seq_len {
             let bit: i64 = if rng.random_range(0..2) == 1 { 1 } else { 0 };
+            if t == 0 { first_bit = bit; } // Tarea real de memoria a largo plazo: recordar el primer bit
             xs.push(bit as f32);
-            sum += bit;
         }
-        ys.push(sum % 2);
+        ys.push(first_bit);
     }
-    let x = Tensor::<TestBackend, 3>::from_data(
+    let x = Tensor::<AtDiffBackend, 3>::from_data(
         TensorData::new(xs.clone(), [batch_size, seq_len, input_size]),
         &device,
     );
-    let y = Tensor::<TestBackend, 1, burn::tensor::Int>::from_data(
+    let y = Tensor::<AtDiffBackend, 1, burn::tensor::Int>::from_data(
         burn::tensor::TensorData::new(ys.clone(), [batch_size]),
         &device,
     );
-    let config = SLstmconfig::new(input_size, hidden_size, 1).with_dropout(0.0).with_forget_bias(0.0);
-    let slstm: SLstm<TestBackend> = config.init(&device);
-    let w_s = Tensor::<TestBackend, 2>::random([hidden_size, 2], Distribution::Default, &device);
-    let b_s = Tensor::<TestBackend, 1>::zeros([2], &device);
-    let w_ih = Tensor::<TestBackend, 2>::random([4 * hidden_size, input_size], Distribution::Default, &device);
-    let w_hh = Tensor::<TestBackend, 2>::random([4 * hidden_size, hidden_size], Distribution::Default, &device);
-    let b = Tensor::<TestBackend, 1>::zeros([4 * hidden_size], &device);
-    let w_l = Tensor::<TestBackend, 2>::random([hidden_size, 2], Distribution::Default, &device);
-    let b_l = Tensor::<TestBackend, 1>::zeros([2], &device);
+
+    let mut model = CopyTestModel::<AtDiffBackend>::new(input_size, hidden_size, &device);
     let loss_fn = burn::nn::loss::CrossEntropyLossConfig::new().init(&device);
-    for epoch in 0..5 {
-        let (h_seq_s, _) = slstm.forward(&x.clone(), None);
-        let h_last_s = h_seq_s.slice([0..batch_size, seq_len-1..seq_len, 0..hidden_size]).reshape([batch_size, hidden_size]);
-        let logits_s = h_last_s.matmul(w_s.clone()) + b_s.clone().unsqueeze_dim(0);
-        let loss_s = loss_fn.forward(logits_s, y.clone());
-        let mut h = Tensor::<TestBackend, 2>::zeros([batch_size, hidden_size], &device);
-        let mut c = Tensor::<TestBackend, 2>::zeros([batch_size, hidden_size], &device);
-        for t in 0..seq_len {
-            let x_t = x.clone().slice([0..batch_size, t..t+1, 0..input_size]).squeeze(1);
-            let gates = x_t.matmul(w_ih.clone().transpose()) + h.matmul(w_hh.clone().transpose()) + b.clone().unsqueeze_dim(0);
-            let chunks = gates.chunk(4, 1);
-            let i = activation::sigmoid(chunks[0].clone());
-            let f = activation::sigmoid(chunks[1].clone());
-            let g = chunks[2].clone().tanh();
-            let o = activation::sigmoid(chunks[3].clone());
-            c = f * c + i * g;
-            h = o * c.clone().tanh();
-        }
-        let logits_l = h.matmul(w_l.clone()) + b_l.clone().unsqueeze_dim(0);
-        let loss_l = loss_fn.forward(logits_l, y.clone());
-        let l_s = loss_s.clone().into_data().as_slice::<f32>().unwrap()[0];
-        let l_l = loss_l.clone().into_data().as_slice::<f32>().unwrap()[0];
-        if epoch % 1 == 0 || epoch == 4 {
-            println!("copy_count epoch {}: sLSTM CE={:.4} LSTM CE={:.4}", epoch + 1, l_s, l_l);
+    
+    // Optimizador para todo el modelo
+    let mut optim = AdamConfig::new().init();
+    let lr = 0.02; // LR ajustado para convergence real en Adam
+
+    for epoch in 0..100 {
+        // Forward
+        let logits = model.forward(x.clone());
+        let loss = loss_fn.forward(logits, y.clone());
+
+        let l_s = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+
+        // Step
+        let grads = loss.backward();
+        let grads_params = burn::optim::GradientsParams::from_grads(grads, &model);
+        model = optim.step(lr, model, grads_params);
+
+        if epoch % 10 == 0 || epoch == 99 {
+            println!("copy_count epoch {}: sLSTM loss={:.4}", epoch + 1, l_s);
         }
     }
 }
